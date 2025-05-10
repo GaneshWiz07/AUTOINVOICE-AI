@@ -97,6 +97,15 @@ async function getSessionAuthenticatedClient(req) {
   return oAuth2Client;
 }
 
+// Helper function to get Gmail client for the current session user
+async function getGmailClient(req) {
+  const oAuth2Client = await getSessionAuthenticatedClient(req);
+  if (!oAuth2Client) {
+    throw new Error('Authentication required. Please log in via Google.');
+  }
+  return google.gmail({version: 'v1', auth: oAuth2Client});
+}
+
 app.get('/', (req, res) => {
   res.send('Autoinvoice AI Backend is running!');
 });
@@ -109,7 +118,7 @@ app.get('/auth/google', async (req, res) => {
     res.redirect(authUrl);
   } catch (error) { 
     console.error('Failed to start Google OAuth flow:', error);
-    res.status(500).send('Failed to initiate Google authentication. Check server logs and credentials.json. Error: ' + error.message);
+    res.status(500).send('Failed to initiate Google authentication. Check server logs or environment variables. Error: ' + error.message);
   }
 });
 
