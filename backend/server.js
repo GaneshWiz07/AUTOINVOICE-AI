@@ -10,6 +10,7 @@ import { uploadFileToSupabase, saveInvoiceData, getInvoicesForUser, getInvoiceBy
 import { extractInvoiceDataWithOpenRouter } from './openRouterService.js';
 import { v4 as uuidv4 } from 'uuid';
 import ExcelJS from 'exceljs';
+import fs from 'fs';
 
 dotenv.config();
 const FileStore = FileStoreFactory(session);
@@ -30,6 +31,7 @@ const port = process.env.PORT || 3001;
 
 // Determine if in production (Render typically sets NODE_ENV to 'production')
 const isProduction = process.env.NODE_ENV === 'production';
+const frontendDomain = isProduction ? new URL(process.env.FRONTEND_URL).hostname : null;
 
 // Session Configuration
 app.use(session({
@@ -38,14 +40,17 @@ app.use(session({
     ttl: 86400,
     logFn: function(msg) { console.log('[session-file-store]', msg); }
   }),
-  secret: process.env.SESSION_SECRET || 'a-very-strong-fallback-secret-key',
+  secret: process.env.SESSION_SECRET || 'a-very-strong-fallback-secret-key-dev',
   resave: false,
   saveUninitialized: false,
   cookie: {
     secure: isProduction,
     httpOnly: true,
-    maxAge: 24 * 60 * 60 * 1000,
-    sameSite: isProduction ? 'lax' : 'lax'
+    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    sameSite: isProduction ? 'lax' : 'lax', // Start with lax
+    // domain: isProduction ? frontendDomain : undefined, // Set domain for production if FE/BE on different subdomains but same parent e.g. app.site.com, api.site.com
+                                                    // Or if on completely different domains, this might be more complex and might need `None` with `Secure`.
+                                                    // For now, let's rely on `lax` and the browser's default behavior for same-origin or first-party contexts.
   }
 }));
 
@@ -64,7 +69,7 @@ async function getCurrentUserInfo(req) {
     console.log(`[getCurrentUserInfo] User found in session: ${req.session.user.email}`);
     return req.session.user;
   }
-  console.warn('[getCurrentUserInfo] No user found in session.');
+  console.warn('[getCurrentUserInfo] No user found in session for session ID:', req.sessionID);
   return null; 
 }
 
@@ -136,7 +141,7 @@ app.get('/auth/google/callback', async (req, res) => {
   if (!code) {
     return res.status(400).send('Authorization code missing.');
   }
-
+  console.log(`[Auth Callback] Received code: ${code.substring(0,10)}...`);
   try {
     const oAuth2ClientForCallback = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
@@ -156,67 +161,69 @@ app.get('/auth/google/callback', async (req, res) => {
       picture: googleUserProfile.picture
     };
 
-    // Create a temporary auth token that can be exchanged for a session
     const tempAuthToken = uuidv4();
-    
-    // Store this token temporarily in the session itself, not global map
     req.session.tempAuthData = {
         token: tempAuthToken,
         userData: userData,
         googleTokens: tokens,
-        expires: Date.now() + (5 * 60 * 1000) // 5 minutes
+        expires: Date.now() + (5 * 60 * 1000) 
     };
 
-    console.log(`[Auth Callback] User ${userData.email} authenticated. Temp auth token ${tempAuthToken.substring(0,8)}... created and stored in session.`);
+    console.log(`[Auth Callback] User ${userData.email} authenticated. Temp auth token ${tempAuthToken.substring(0,8)} stored in session ID: ${req.sessionID}`);
     
     req.session.save(err => {
       if (err) {
         console.error('[Auth Callback] Session save error before redirect:', err);
         return res.status(500).send('Error saving session before redirecting to frontend.');
       }
-      console.log('[Auth Callback] Session saved, redirecting to frontend with token.');
+      // Log the cookie that *should* be set
+      const sessionCookie = req.sessionStore.generate(req);
+      console.log(`[Auth Callback] Session saved. Cookie to be set (approx): ${sessionCookie}. Redirecting to frontend with token.`);
       res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth-success?token=${tempAuthToken}`);
     });
 
   } catch (error) {
-    console.error('[Auth Callback] Error during Google OAuth callback:', error);
-    // Don't destroy session here if it wasn't fully established or if error is unrelated to session
-    res.status(500).send('Error processing Google authentication: ' + error.message);
+    console.error('[Auth Callback] Error during Google OAuth callback:', error.response ? error.response.data : error.message, error.stack);
+    res.status(500).send('Error processing Google authentication: ' + (error.response ? error.response.data.error_description || error.message : error.message));
   }
 });
 
-// Token Exchange Endpoint - Validates temp token from session
+// Token Exchange Endpoint
 app.get('/api/exchange-token', (req, res) => {
   const { token: providedToken } = req.query;
-  console.log(`[Exchange Token] Received request with token: ${providedToken ? providedToken.substring(0,8) : 'NONE'}...`);
+  console.log(`[Exchange Token] Received request. Session ID: ${req.sessionID}, Provided Token: ${providedToken ? providedToken.substring(0,8) : 'NONE'}`);
+  console.log(`[Exchange Token] Current req.session.tempAuthData:`, req.session.tempAuthData);
 
   if (!req.session.tempAuthData || !req.session.tempAuthData.token || req.session.tempAuthData.token !== providedToken) {
-    console.warn('[Exchange Token] Invalid or missing temporary token in session or mismatched token.', { sessionTempToken: req.session.tempAuthData?.token?.substring(0,8), providedToken: providedToken?.substring(0,8) });
-    return res.status(401).json({ success: false, message: 'Invalid or expired authentication token (session mismatch).' });
+    console.warn('[Exchange Token] Invalid or missing temporary token in session or mismatched token.', { 
+      sessionTempToken: req.session.tempAuthData?.token?.substring(0,8),
+      sessionTempDataExists: !!req.session.tempAuthData,
+      providedToken: providedToken?.substring(0,8) 
+    });
+    return res.status(401).json({ success: false, message: 'Invalid or expired authentication token (session/token mismatch).' });
   }
   
   const tokenData = req.session.tempAuthData;
   
   if (tokenData.expires < Date.now()) {
     console.warn('[Exchange Token] Temporary token expired.');
-    delete req.session.tempAuthData; // Clean up expired token data
-    req.session.save();
+    delete req.session.tempAuthData;
+    req.session.save(); // Save after deleting
     return res.status(401).json({ success: false, message: 'Authentication token expired.' });
   }
   
-  // Set up the user's main session variables
   req.session.user = tokenData.userData;
   req.session.googleTokens = tokenData.googleTokens;
-  console.log(`[Exchange Token] User ${req.session.user.email} session being established.`);
+  console.log(`[Exchange Token] User ${req.session.user.email} main session variables being established.`);
   
-  delete req.session.tempAuthData; // Remove the temporary token data as it's now used
+  delete req.session.tempAuthData;
   
   req.session.save(err => {
     if (err) {
       console.error('[Exchange Token] Session save error after establishing main session:', err);
       return res.status(500).json({ success: false, message: 'Error saving session after token exchange.' });
     }
-    console.log(`[Exchange Token] Main session saved for user ${req.session.user.email}. Cookie: ${req.headers.cookie}`);
+    console.log(`[Exchange Token] Main session saved for user ${req.session.user.email}.`);
     res.status(200).json({ 
       success: true, 
       message: 'Authentication successful, session established.',
@@ -582,7 +589,6 @@ app.post('/api/logout', (req, res) => { // Using POST for logout is a good pract
 
 // Make sure the .sessions directory exists or handle its creation
 const sessionsDir = './.sessions';
-import fs from 'fs';
 if (!fs.existsSync(sessionsDir)){
     fs.mkdirSync(sessionsDir, { recursive: true });
     console.log(`Created session directory: ${sessionsDir}`)
@@ -590,6 +596,8 @@ if (!fs.existsSync(sessionsDir)){
 
 app.listen(port, () => {
   console.log(`Autoinvoice AI Backend is running on port ${port}, production: ${isProduction}`);
+  console.log(`Frontend URL configured as: ${process.env.FRONTEND_URL}`);
+  console.log(`Backend Google Redirect URI: ${process.env.GOOGLE_REDIRECT_URI}`);
 });
 
 export default app;
