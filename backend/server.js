@@ -14,28 +14,45 @@ import ExcelJS from 'exceljs';
 
 dotenv.config();
 
-// Check Supabase connection right after config is loaded and client is imported
 if (supabase) {
-  console.log('Supabase client initialized successfully.');
+  console.log('Supabase client initialized successfully for general operations.');
 } else {
-  console.error('CRITICAL: Supabase client failed to initialize. Check .env and Supabase project status. Backend operations requiring Supabase will fail.');
-  // Optionally, exit if Supabase is absolutely critical for startup
-  // process.exit(1);
+  console.error('CRITICAL: Supabase client failed to initialize.');
 }
 
 const app = express();
 const port = process.env.PORT || 3001;
 
-// PostgreSQL Store for Sessions
 const PgStore = connectPgSimple(session);
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL, // Ensure this is in your Render env vars
-  // Add SSL for production connections to Supabase if required by your Supabase setup
+
+// Database Pool Configuration
+const dbPoolConfig = {
+  connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-});
+};
+
+// Attempt to extract hostname and resolve to IPv4 if in production to avoid IPv6 issues
+if (process.env.NODE_ENV === 'production' && process.env.DATABASE_URL) {
+  try {
+    const url = new URL(process.env.DATABASE_URL);
+    // Simple check, you might need a more robust DNS lookup here in a real scenario
+    // or use an IPv4-specific hostname from Supabase if available.
+    // For now, this is a placeholder for the concept.
+    // If your Supabase hostname consistently resolves to IPv6 first and causes issues,
+    // you might need to set an explicit IPv4 address or an IPv4-specific CNAME if Supabase provides one.
+    console.log(`Original DB hostname: ${url.hostname}`);
+    // pg library usually handles DNS resolution. If issues persist, 
+    // check pg documentation for options like 'family' or if your Supabase 
+    // provides an explicit IPv4 connection string/hostname.
+  } catch (e) {
+    console.error('Could not parse DATABASE_URL for hostname extraction:', e);
+  }
+}
+
+const pool = new pg.Pool(dbPoolConfig);
 
 pool.on('connect', () => {
-  console.log('Connected to PostgreSQL for session store.');
+  console.log('Connected to PostgreSQL for session store via connection pool.');
 });
 pool.on('error', (err) => {
   console.error('PostgreSQL pool error for session store:', err);
@@ -44,16 +61,16 @@ pool.on('error', (err) => {
 app.use(session({
   store: new PgStore({
     pool: pool,
-    tableName: 'user_sessions',       // Name of the session table
-    createTableIfMissing: true,     // Automatically creates the table
+    tableName: 'user_sessions',
+    createTableIfMissing: true,
   }),
-  secret: process.env.SESSION_SECRET || 'autoinvoice-ai-super-strong-fallback-secret', // Use a strong secret from ENV
+  secret: process.env.SESSION_SECRET || 'autoinvoice-ai-super-strong-fallback-secret',
   resave: false,
-  saveUninitialized: false, // Important: Set to false. Session created only on login.
+  saveUninitialized: false,
   cookie: {
     secure: process.env.NODE_ENV === 'production',
     httpOnly: true,
-    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    maxAge: 24 * 60 * 60 * 1000,
     sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'lax'
   }
 }));
