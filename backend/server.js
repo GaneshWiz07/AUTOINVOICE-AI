@@ -40,7 +40,9 @@ app.use(session({
 }));
 
 app.use(cors({ 
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173', 
+  origin: process.env.FRONTEND_URL ? 
+    [process.env.FRONTEND_URL, 'http://localhost:5173', 'https://autoinvoice-ai.pages.dev'] : 
+    ['http://localhost:5173', 'https://autoinvoice-ai.pages.dev'],
   credentials: true // Important: Allow cookies to be sent from frontend
 }));
 app.use(express.json());
