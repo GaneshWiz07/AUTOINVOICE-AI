@@ -1,5 +1,7 @@
 import express from 'express';
 import session from 'express-session';
+import connectPgSimple from 'connect-pg-simple';
+import pg from 'pg';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { supabase } from './supabaseClient.js';
@@ -24,18 +26,25 @@ if (supabase) {
 const app = express();
 const port = process.env.PORT || 3001;
 
-// Session Configuration
-// IMPORTANT: In production, use a persistent session store instead of MemoryStore.
-// Examples: connect-pg-simple (for Supabase/Postgres), connect-redis, connect-mongo
+const PgStore = connectPgSimple(session);
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL, // Create this env var with your Supabase DB connection string
+});
+
 app.use(session({
-  secret: 'autoinvoice-ai-default-secret', // Using a hardcoded secret instead of env variable
+  store: new PgStore({
+    pool: pool,
+    tableName: 'user_sessions',       // You can customize this table name
+    createTableIfMissing: true    // This will create the table if it doesn't exist
+  }),
+  secret: 'autoinvoice-ai-default-secret',
   resave: false,
-  saveUninitialized: true, // Change to true to ensure session is always stored
+  saveUninitialized: false, // Set to false, session created on login
   cookie: {
-    secure: false, // Set to false for development (no HTTPS)
+    secure: process.env.NODE_ENV === 'production',
     httpOnly: true,
     maxAge: 24 * 60 * 60 * 1000, // 24 hours
-    sameSite: 'lax' // Allow cookies to be sent in cross-origin requests
+    sameSite: 'lax' // 'lax' is a good default
   }
 }));
 
@@ -485,7 +494,101 @@ app.delete('/api/invoices/:id', async (req, res) => {
 
 // Route to download invoices as an Excel file
 app.get('/download-excel', async (req, res) => {
-  // ... existing code ...
+  try {
+    const userInfo = await getCurrentUserInfo(req);
+    if (!userInfo || !userInfo.id) {
+      console.warn('User not authenticated for /download-excel');
+      return res.status(401).send('Authentication required. Please log in via Google.');
+    }
+    const userId = userInfo.id;
+    const userEmail = userInfo.email || 'anonymous';
+    console.log(`Generating Excel for user: ${userEmail} (ID: ${userId})`);
+
+    const invoices = await getInvoicesForUser(userId);
+
+    if (!invoices || invoices.length === 0) {
+      return res.status(404).send('No invoices found for this user to download.');
+    }
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Autoinvoice AI';
+    workbook.lastModifiedBy = 'Autoinvoice AI';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+    workbook.lastPrinted = new Date();
+
+    const worksheet = workbook.addWorksheet('Invoices');
+
+    worksheet.columns = [
+      { header: 'ID', key: 'id', width: 38 },
+      { header: 'Invoice Number', key: 'invoice_number', width: 20 },
+      { header: 'Vendor', key: 'vendor', width: 30 },
+      { header: 'Amount', key: 'amount', width: 15, style: { numFmt: '$#,##0.00' } },
+      { header: 'Invoice Date', key: 'invoice_date', width: 15, style: { numFmt: 'yyyy-mm-dd' } },
+      { header: 'Due Date', key: 'due_date', width: 15, style: { numFmt: 'yyyy-mm-dd' } },
+      { header: 'File Name', key: 'file_name', width: 40 },
+      { header: 'File URL', key: 'file_url', width: 50 },
+      { header: 'Created At', key: 'created_at', width: 20, style: { numFmt: 'yyyy-mm-dd hh:mm:ss' } },
+    ];
+
+    invoices.forEach(invoice => {
+      worksheet.addRow({
+        id: invoice.id,
+        invoice_number: invoice.invoice_number,
+        vendor: invoice.vendor,
+        amount: invoice.amount,
+        invoice_date: invoice.invoice_date ? new Date(invoice.invoice_date) : null,
+        due_date: invoice.due_date ? new Date(invoice.due_date) : null,
+        file_name: invoice.file_name,
+        file_url: invoice.file_url,
+        created_at: invoice.created_at ? new Date(invoice.created_at) : null,
+      });
+    });
+
+    const headerRow = worksheet.getRow(1);
+    headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+
+    const headerFill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF203764' } // Blue background
+    };
+
+    worksheet.columns.forEach((column, index) => {
+      headerRow.getCell(index + 1).fill = headerFill;
+    });
+
+    const borderStyle = {
+      top: { style: 'thin', color: { argb: 'FF000000' } },
+      left: { style: 'thin', color: { argb: 'FF000000' } },
+      bottom: { style: 'thin', color: { argb: 'FF000000' } },
+      right: { style: 'thin', color: { argb: 'FF000000' } }
+    };
+
+    worksheet.eachRow({ includeEmpty: true }, function(row, rowNumber) {
+      row.eachCell({ includeEmpty: true }, function(cell, colNumber) {
+        cell.border = borderStyle;
+      });
+    });
+
+    const filename = `invoices_${userEmail.split('@')[0]}_${new Date().toISOString().split('T')[0]}.xlsx`;
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${filename}"`
+    );
+
+    await workbook.xlsx.write(res);
+    res.end();
+
+  } catch (error) {
+    console.error('Error generating Excel file:', error.message);
+    res.status(500).send('Failed to generate Excel file: ' + error.message);
+  }
 });
 
 // New endpoint to update invoice status
