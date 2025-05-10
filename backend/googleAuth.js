@@ -3,13 +3,17 @@ import { google } from 'googleapis';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+
+// Load environment variables
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const SCOPES = ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/userinfo.profile', 'https://www.googleapis.com/auth/userinfo.email'];
 // const TOKEN_PATH = path.join(__dirname, 'token.json'); // No longer used for multi-user session flow
-const CREDENTIALS_PATH = path.join(__dirname, 'credentials.json'); 
+// const CREDENTIALS_PATH = path.join(__dirname, 'credentials.json'); // No longer using file-based credentials
 
 /*
 // Functions related to token.json (loadSavedCredentialsIfExist, saveCredentials, authorize) 
@@ -18,31 +22,25 @@ const CREDENTIALS_PATH = path.join(__dirname, 'credentials.json');
 */
 
 /**
- * Initializes an OAuth2 client with application credentials.
+ * Initializes an OAuth2 client with application credentials from environment variables.
  * This client is used to generate the auth URL and for the initial token exchange.
  * @return {Promise<google.auth.OAuth2>}
  */
 export async function getOAuthClient() {
   try {
-    const credentialsContent = await fs.readFile(CREDENTIALS_PATH);
-    const config = JSON.parse(credentialsContent);
-    // Ensure we are using web credentials if available, otherwise try installed
-    const creds = config.web || config.installed;
-    if (!creds) {
-        throw new Error('Web or installed credentials not found in credentials.json');
-    }
-    const { client_secret, client_id, redirect_uris } = creds;
-    // Use the redirect_uri from environment variable if available, otherwise the first one from credentials.json
-    const redirectUri = process.env.GOOGLE_REDIRECT_URI || (redirect_uris && redirect_uris.length > 0 ? redirect_uris[0] : undefined);
-    if (!redirectUri) {
-        throw new Error('Redirect URI not found in credentials.json or GOOGLE_REDIRECT_URI env var.');
+    const client_id = process.env.GOOGLE_CLIENT_ID;
+    const client_secret = process.env.GOOGLE_CLIENT_SECRET;
+    const redirectUri = process.env.GOOGLE_REDIRECT_URI;
+    
+    if (!client_id || !client_secret || !redirectUri) {
+      throw new Error('Google OAuth credentials not found in environment variables.');
     }
 
     const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirectUri);
     return oAuth2Client;
   } catch (err) {
-      console.error('Error reading credentials.json for OAuth client:', err);
-      throw new Error('Could not initialize OAuth client. Ensure credentials.json exists and is valid. Error: ' + err.message);
+    console.error('Error initializing OAuth client:', err);
+    throw new Error('Could not initialize OAuth client. Ensure environment variables are set correctly. Error: ' + err.message);
   }
 }
 
