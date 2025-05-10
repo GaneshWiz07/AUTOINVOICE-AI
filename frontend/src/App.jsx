@@ -7,7 +7,8 @@ import InvoiceTable from './components/InvoiceTable'
 import EditInvoiceModal from './components/EditInvoiceModal'
 import SummaryCards from './components/SummaryCards'
 import ActivityTimeline from './components/ActivityTimeline'
-import { API_BASE_URL } from './config' // Import API URL from config
+
+const API_BASE_URL = 'http://localhost:3001' // Your backend URL
 
 // SVG logo component for AutoInvoice AI
 const Logo = () => (

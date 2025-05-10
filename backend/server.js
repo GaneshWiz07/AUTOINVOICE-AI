@@ -40,9 +40,7 @@ app.use(session({
 }));
 
 app.use(cors({ 
-  origin: process.env.FRONTEND_URL ? 
-    [process.env.FRONTEND_URL, 'http://localhost:5173', 'https://autoinvoice-ai.pages.dev'] : 
-    ['http://localhost:5173', 'https://autoinvoice-ai.pages.dev'],
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173', 
   credentials: true // Important: Allow cookies to be sent from frontend
 }));
 app.use(express.json());
@@ -97,15 +95,6 @@ async function getSessionAuthenticatedClient(req) {
   return oAuth2Client;
 }
 
-// Helper function to get Gmail client for the current session user
-async function getGmailClient(req) {
-  const oAuth2Client = await getSessionAuthenticatedClient(req);
-  if (!oAuth2Client) {
-    throw new Error('Authentication required. Please log in via Google.');
-  }
-  return google.gmail({version: 'v1', auth: oAuth2Client});
-}
-
 app.get('/', (req, res) => {
   res.send('Autoinvoice AI Backend is running!');
 });
@@ -118,7 +107,7 @@ app.get('/auth/google', async (req, res) => {
     res.redirect(authUrl);
   } catch (error) { 
     console.error('Failed to start Google OAuth flow:', error);
-    res.status(500).send('Failed to initiate Google authentication. Check server logs or environment variables. Error: ' + error.message);
+    res.status(500).send('Failed to initiate Google authentication. Check server logs and credentials.json. Error: ' + error.message);
   }
 });
 
