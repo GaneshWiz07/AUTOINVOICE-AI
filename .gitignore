@@ -18,4 +18,10 @@ yarn-error.log
 .Spotlight-V100
 .Trashes
 ehthumbs.db
-Thumbs.db 
+Thumbs.db
+
+# Google OAuth credentials
+credentials.json
+token.json
+**/credentials.json
+**/token.json 
