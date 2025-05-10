@@ -29,6 +29,9 @@ const port = process.env.PORT || 3001;
 const PgStore = connectPgSimple(session);
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL, // Create this env var with your Supabase DB connection string
+  ssl: {
+    rejectUnauthorized: false // Try this first for Render/Supabase, but see note below
+  }
 });
 
 app.use(session({
