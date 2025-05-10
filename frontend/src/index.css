@@ -1,0 +1,19 @@
+/* Base reset for better compatibility */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body, html {
+  margin: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* Force the styles from App.css to take precedence */
+#root {
+  height: 100%;
+  width: 100%;
+}
