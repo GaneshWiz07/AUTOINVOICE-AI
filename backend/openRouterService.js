@@ -1,10 +1,10 @@
 import axios from 'axios';
 import dotenv from 'dotenv';
-import poppler from 'pdf-poppler';
 import path from 'path';
 import os from 'os';
 import fs from 'fs/promises';
 import { v4 as uuidv4 } from 'uuid';
+import { Poppler } from 'node-poppler';
 
 dotenv.config();
 
@@ -127,20 +127,20 @@ async function extractInvoiceDataWithOpenRouter(originalFileBuffer, originalMime
             await fs.writeFile(tempPdfPath, originalFileBuffer);
             console.log(`Temporary PDF saved to: ${tempPdfPath}`);
 
-            const options = {
-                format: 'png',
-                out_dir: tempDir,
-                out_prefix: 'page',
-                // No specific page number, convert all pages
+            const poppler = new Poppler();
+            const pdfToCairoOptions = {
+                pngFile: true,
+                singleFile: false,
+                cropBox: true,
+                jpegFile: false
             };
-
-            // This call might not return detailed info about pages, so we'll list files.
-            await poppler.convert(tempPdfPath, options); 
-            console.log('PDF to PNG conversion process initiated/completed.');
+            
+            await poppler.pdfToCairo(tempPdfPath, path.join(tempDir, 'page'), pdfToCairoOptions);
+            console.log('PDF to PNG conversion process completed.');
 
             const filesInTempDir = await fs.readdir(tempDir);
             const imageFiles = filesInTempDir
-                .filter(f => /^page-\d+\.png$/.test(f)) // More specific regex to match page-NUMBER.png
+                .filter(f => /^page-\d+\.png$/.test(f))
                 .sort((a, b) => {
                     const matchA = a.match(/page-(\d+)\.png/);
                     const matchB = b.match(/page-(\d+)\.png/);
@@ -160,7 +160,7 @@ async function extractInvoiceDataWithOpenRouter(originalFileBuffer, originalMime
                 });
             
             if (imageFiles.length === 0) {
-                throw new Error('No PNG images found after PDF conversion. Poppler might have failed or PDF was empty.');
+                throw new Error('No PNG images found after PDF conversion. PDF conversion might have failed or PDF was empty.');
             }
             console.log(`Found ${imageFiles.length} page(s) converted from PDF.`);
 
