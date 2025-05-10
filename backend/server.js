@@ -1,5 +1,7 @@
 import express from 'express';
 import session from 'express-session';
+import connectPgSimple from 'connect-pg-simple';
+import pg from 'pg';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { supabase } from './supabaseClient.js';
@@ -24,27 +26,36 @@ if (supabase) {
 const app = express();
 const port = process.env.PORT || 3001;
 
-// Session Configuration
+// PostgreSQL Store for Sessions
+const PgStore = connectPgSimple(session);
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL, // Ensure this is in your Render env vars
+  // Add SSL for production connections to Supabase if required by your Supabase setup
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+});
+
+pool.on('connect', () => {
+  console.log('Connected to PostgreSQL for session store.');
+});
+pool.on('error', (err) => {
+  console.error('PostgreSQL pool error for session store:', err);
+});
+
 app.use(session({
-  secret: 'autoinvoice-ai-default-secret', // Keep this or use a strong env var
+  store: new PgStore({
+    pool: pool,
+    tableName: 'user_sessions',       // Name of the session table
+    createTableIfMissing: true,     // Automatically creates the table
+  }),
+  secret: process.env.SESSION_SECRET || 'autoinvoice-ai-super-strong-fallback-secret', // Use a strong secret from ENV
   resave: false,
-  saveUninitialized: true, // Keeps session created even if not modified, can be useful
+  saveUninitialized: false, // Important: Set to false. Session created only on login.
   cookie: {
-    secure: process.env.NODE_ENV === 'production', // TRUE in production (like Render), false in dev
+    secure: process.env.NODE_ENV === 'production',
     httpOnly: true,
     maxAge: 24 * 60 * 60 * 1000, // 24 hours
-    // For cross-domain cookies to work with HTTPS, SameSite='None' is needed.
-    // 'lax' is more secure if frontend and backend are on the same site (e.g. subdomains of the same eTLD+1)
-    // On Render, your frontend and backend might be on different subdomains of onrender.com or custom domains.
-    // Using 'None' with 'secure: true' is a common setup for this.
     sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'lax'
   }
-  // IMPORTANT FOR PRODUCTION ON RENDER:
-  // The default MemoryStore is not suitable for production as it will leak memory
-  // and won't work across multiple instances or if your app restarts.
-  // Consider using a persistent store like connect-redis, connect-mongo, or connect-pg-simple.
-  // Example with connect-redis (you'd need to npm install redis connect-redis):
-  // store: new RedisStore({ client: redisClient, prefix: "autoinvoice_sess:" }),
 }));
 
 app.use(cors({
@@ -57,14 +68,14 @@ app.use(express.json());
 
 // Helper function to get user info using the current auth state
 // MODIFIED: This will now primarily use session data
-async function getCurrentUserInfo(req) { // Pass req to access session
+async function getCurrentUserInfo(req) {
+  console.log('getCurrentUserInfo called. Session ID from req:', req.sessionID);
   if (req.session && req.session.user) {
-    return req.session.user; // Return user info stored in session
+    console.log('User found in session for getCurrentUserInfo:', req.session.user.email);
+    return req.session.user;
   }
-  // If no session user, try to fall back to old method (though this should be phased out for multi-user)
-  // For multi-user, if !req.session.user, they are not logged in via session.
-  console.warn('getCurrentUserInfo called without a user in session.');
-  return null; 
+  console.warn('No user found in session for getCurrentUserInfo.');
+  return null;
 }
 
 // Helper function to get a Gmail client using session tokens
@@ -579,7 +590,7 @@ app.get('/api/session-check', (req, res) => {
 });
 
 // New endpoint for user logout
-app.post('/api/logout', (req, res) => { // Using POST for logout is a good practice
+app.post('/api/logout', (req, res) => {
   const userEmail = req.session.user ? req.session.user.email : 'Unknown user';
   console.log(`Logout attempt for user: ${userEmail}. Session ID: ${req.sessionID}`);
   req.session.destroy(err => {
@@ -587,8 +598,7 @@ app.post('/api/logout', (req, res) => { // Using POST for logout is a good pract
       console.error('Error destroying session during logout:', err);
       return res.status(500).send({ message: 'Could not log out, please try again.' });
     }
-    // The name 'connect.sid' is the default for express-session.
-    res.clearCookie('connect.sid'); // Ensure this matches your session cookie name if customized
+    res.clearCookie('connect.sid'); // Ensure cookie name matches
     console.log(`Session destroyed for ${userEmail}. Cookie cleared.`);
     res.status(200).json({ message: 'Logged out successfully' });
   });
