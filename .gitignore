@@ -18,7 +18,4 @@ yarn-error.log
 .Spotlight-V100
 .Trashes
 ehthumbs.db
-Thumbs.db
-
-# Session files
-backend/.sessions/ 
+Thumbs.db 

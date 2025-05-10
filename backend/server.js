@@ -1,6 +1,5 @@
 import express from 'express';
 import session from 'express-session';
-import FileStoreFactory from 'session-file-store';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { supabase } from './supabaseClient.js';
@@ -10,10 +9,8 @@ import { uploadFileToSupabase, saveInvoiceData, getInvoicesForUser, getInvoiceBy
 import { extractInvoiceDataWithOpenRouter } from './openRouterService.js';
 import { v4 as uuidv4 } from 'uuid';
 import ExcelJS from 'exceljs';
-import fs from 'fs';
 
 dotenv.config();
-const FileStore = FileStoreFactory(session);
 
 // Check Supabase connection right after config is loaded and client is imported
 if (supabase) {
@@ -25,38 +22,26 @@ if (supabase) {
 }
 
 const app = express();
-app.set('trust proxy', 1);
-
 const port = process.env.PORT || 3001;
 
-// Determine if in production (Render typically sets NODE_ENV to 'production')
-const isProduction = process.env.NODE_ENV === 'production';
-const frontendDomain = isProduction ? new URL(process.env.FRONTEND_URL).hostname : null;
-
 // Session Configuration
+// IMPORTANT: In production, use a persistent session store instead of MemoryStore.
+// Examples: connect-pg-simple (for Supabase/Postgres), connect-redis, connect-mongo
 app.use(session({
-  store: new FileStore({
-    path: './.sessions',
-    ttl: 86400,
-    logFn: function(msg) { console.log('[session-file-store]', msg); }
-  }),
-  secret: process.env.SESSION_SECRET || 'a-very-strong-fallback-secret-key-dev',
+  secret: 'autoinvoice-ai-default-secret', // Using a hardcoded secret instead of env variable
   resave: false,
-  saveUninitialized: false,
+  saveUninitialized: true, // Change to true to ensure session is always stored
   cookie: {
-    secure: isProduction,
+    secure: false, // Set to false for development (no HTTPS)
     httpOnly: true,
     maxAge: 24 * 60 * 60 * 1000, // 24 hours
-    sameSite: isProduction ? 'lax' : 'lax', // Start with lax
-    // domain: isProduction ? frontendDomain : undefined, // Set domain for production if FE/BE on different subdomains but same parent e.g. app.site.com, api.site.com
-                                                    // Or if on completely different domains, this might be more complex and might need `None` with `Secure`.
-                                                    // For now, let's rely on `lax` and the browser's default behavior for same-origin or first-party contexts.
+    sameSite: 'lax' // Allow cookies to be sent in cross-origin requests
   }
 }));
 
-app.use(cors({
+app.use(cors({ 
   origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials: true,
+  credentials: true, // Important: Allow cookies to be sent from frontend
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
@@ -64,12 +49,13 @@ app.use(express.json());
 
 // Helper function to get user info using the current auth state
 // MODIFIED: This will now primarily use session data
-async function getCurrentUserInfo(req) {
+async function getCurrentUserInfo(req) { // Pass req to access session
   if (req.session && req.session.user) {
-    console.log(`[getCurrentUserInfo] User found in session: ${req.session.user.email}`);
-    return req.session.user;
+    return req.session.user; // Return user info stored in session
   }
-  console.warn('[getCurrentUserInfo] No user found in session for session ID:', req.sessionID);
+  // If no session user, try to fall back to old method (though this should be phased out for multi-user)
+  // For multi-user, if !req.session.user, they are not logged in via session.
+  console.warn('getCurrentUserInfo called without a user in session.');
   return null; 
 }
 
@@ -141,92 +127,104 @@ app.get('/auth/google/callback', async (req, res) => {
   if (!code) {
     return res.status(400).send('Authorization code missing.');
   }
-  console.log(`[Auth Callback] Received code: ${code.substring(0,10)}...`);
+
   try {
-    const oAuth2ClientForCallback = new google.auth.OAuth2(
+    let oAuth2ClientForCallback = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_CLIENT_SECRET,
       process.env.GOOGLE_REDIRECT_URI
     );
+    // Get tokens from Google
     const { tokens } = await oAuth2ClientForCallback.getToken(code);
     oAuth2ClientForCallback.setCredentials(tokens);
 
+    // Store tokens in session
+    req.session.googleTokens = tokens; 
+
+    // Fetch user info
     const oauth2 = google.oauth2({version: 'v2', auth: oAuth2ClientForCallback});
     const { data: googleUserProfile } = await oauth2.userinfo.get();
     
-    const userData = {
+    // Store user data in session
+    req.session.user = {
       id: googleUserProfile.id,
       email: googleUserProfile.email,
       name: googleUserProfile.name,
       picture: googleUserProfile.picture
     };
 
+    // Create a temporary auth token that can be exchanged for a session
     const tempAuthToken = uuidv4();
-    req.session.tempAuthData = {
-        token: tempAuthToken,
-        userData: userData,
-        googleTokens: tokens,
-        expires: Date.now() + (5 * 60 * 1000) 
-    };
-
-    console.log(`[Auth Callback] User ${userData.email} authenticated. Temp auth token ${tempAuthToken.substring(0,8)} stored in session ID: ${req.sessionID}`);
     
-    req.session.save(err => {
-      if (err) {
-        console.error('[Auth Callback] Session save error before redirect:', err);
-        return res.status(500).send('Error saving session before redirecting to frontend.');
-      }
-      // Log the cookie that *should* be set
-      const sessionCookie = req.sessionStore.generate(req);
-      console.log(`[Auth Callback] Session saved. Cookie to be set (approx): ${sessionCookie}. Redirecting to frontend with token.`);
-      res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth-success?token=${tempAuthToken}`);
+    // Store this token temporarily (we'll use a global Map for simplicity, in production use Redis)
+    if (!global.tempAuthTokens) {
+      global.tempAuthTokens = new Map();
+    }
+    
+    // Store the user data with the token (expires in 5 minutes)
+    global.tempAuthTokens.set(tempAuthToken, {
+      userData: req.session.user,
+      googleTokens: tokens,
+      expires: Date.now() + (5 * 60 * 1000) // 5 minutes
     });
 
+    // Debug log
+    console.log(`User ${googleUserProfile.email} authenticated. Tokens stored with tempAuthToken: ${tempAuthToken.substring(0, 8)}...`);
+    
+    // Set expiration cleanup for token
+    setTimeout(() => {
+      if (global.tempAuthTokens && global.tempAuthTokens.has(tempAuthToken)) {
+        global.tempAuthTokens.delete(tempAuthToken);
+        console.log(`Expired tempAuthToken ${tempAuthToken.substring(0, 8)}...`);
+      }
+    }, 5 * 60 * 1000);
+    
+    // Redirect with token
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth-success?token=${tempAuthToken}`);
+
   } catch (error) {
-    console.error('[Auth Callback] Error during Google OAuth callback:', error.response ? error.response.data : error.message, error.stack);
-    res.status(500).send('Error processing Google authentication: ' + (error.response ? error.response.data.error_description || error.message : error.message));
+    console.error('Error during Google OAuth callback:', error);
+    req.session.destroy(err => {
+      if (err) console.error('Error destroying session on auth failure:', err);
+    });
+    res.status(500).send('Error processing Google authentication: ' + error.message);
   }
 });
 
-// Token Exchange Endpoint
+// Add a token exchange endpoint to validate temporary tokens
 app.get('/api/exchange-token', (req, res) => {
-  const { token: providedToken } = req.query;
-  console.log(`[Exchange Token] Received request. Session ID: ${req.sessionID}, Provided Token: ${providedToken ? providedToken.substring(0,8) : 'NONE'}`);
-  console.log(`[Exchange Token] Current req.session.tempAuthData:`, req.session.tempAuthData);
-
-  if (!req.session.tempAuthData || !req.session.tempAuthData.token || req.session.tempAuthData.token !== providedToken) {
-    console.warn('[Exchange Token] Invalid or missing temporary token in session or mismatched token.', { 
-      sessionTempToken: req.session.tempAuthData?.token?.substring(0,8),
-      sessionTempDataExists: !!req.session.tempAuthData,
-      providedToken: providedToken?.substring(0,8) 
-    });
-    return res.status(401).json({ success: false, message: 'Invalid or expired authentication token (session/token mismatch).' });
+  const { token } = req.query;
+  
+  if (!token || !global.tempAuthTokens || !global.tempAuthTokens.has(token)) {
+    return res.status(401).json({ success: false, message: 'Invalid or expired token' });
   }
   
-  const tokenData = req.session.tempAuthData;
+  const tokenData = global.tempAuthTokens.get(token);
   
+  // Check if token is expired
   if (tokenData.expires < Date.now()) {
-    console.warn('[Exchange Token] Temporary token expired.');
-    delete req.session.tempAuthData;
-    req.session.save(); // Save after deleting
-    return res.status(401).json({ success: false, message: 'Authentication token expired.' });
+    global.tempAuthTokens.delete(token);
+    return res.status(401).json({ success: false, message: 'Token expired' });
   }
   
+  // Set up the user's session
   req.session.user = tokenData.userData;
   req.session.googleTokens = tokenData.googleTokens;
-  console.log(`[Exchange Token] User ${req.session.user.email} main session variables being established.`);
   
-  delete req.session.tempAuthData;
+  // Remove the temporary token
+  global.tempAuthTokens.delete(token);
   
+  // Save the session
   req.session.save(err => {
     if (err) {
-      console.error('[Exchange Token] Session save error after establishing main session:', err);
-      return res.status(500).json({ success: false, message: 'Error saving session after token exchange.' });
+      console.error('Session save error during token exchange:', err);
+      return res.status(500).json({ success: false, message: 'Error saving session' });
     }
-    console.log(`[Exchange Token] Main session saved for user ${req.session.user.email}.`);
+    
+    // Return success with user data
     res.status(200).json({ 
       success: true, 
-      message: 'Authentication successful, session established.',
+      message: 'Authentication successful',
       user: tokenData.userData
     });
   });
@@ -587,17 +585,6 @@ app.post('/api/logout', (req, res) => { // Using POST for logout is a good pract
   });
 });
 
-// Make sure the .sessions directory exists or handle its creation
-const sessionsDir = './.sessions';
-if (!fs.existsSync(sessionsDir)){
-    fs.mkdirSync(sessionsDir, { recursive: true });
-    console.log(`Created session directory: ${sessionsDir}`)
-}
-
 app.listen(port, () => {
-  console.log(`Autoinvoice AI Backend is running on port ${port}, production: ${isProduction}`);
-  console.log(`Frontend URL configured as: ${process.env.FRONTEND_URL}`);
-  console.log(`Backend Google Redirect URI: ${process.env.GOOGLE_REDIRECT_URI}`);
+  console.log(`Autoinvoice AI Backend is running on port ${port}`);
 });
-
-export default app;
