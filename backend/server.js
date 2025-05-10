@@ -11,7 +11,6 @@ import { extractInvoiceDataWithOpenRouter } from './openRouterService.js';
 import { v4 as uuidv4 } from 'uuid';
 import ExcelJS from 'exceljs';
 import fs from 'fs';
-import path from 'path'; // For joining paths
 
 dotenv.config();
 const FileStore = FileStoreFactory(session);
@@ -34,57 +33,24 @@ const port = process.env.PORT || 3001;
 const isProduction = process.env.NODE_ENV === 'production';
 const frontendDomain = isProduction ? new URL(process.env.FRONTEND_URL).hostname : null;
 
-// Define a writable directory for sessions. On Render, this is typically /data.
-// Fallback to local .sessions for local development.
-const sessionsDir = isProduction ? path.join('/data', '.sessions') : path.join(process.cwd(), '.sessions');
-
-// Ensure session directory exists
-if (!fs.existsSync(sessionsDir)){
-    try {
-        fs.mkdirSync(sessionsDir, { recursive: true });
-        console.log(`Session directory created/ensured at: ${sessionsDir}`);
-    } catch (dirError) {
-        console.error(`Error creating session directory at ${sessionsDir}:`, dirError);
-        // Potentially fall back or exit if session storage is critical
-    }
-}
-
-// Cookie domain configuration
-let cookieDomain;
-if (isProduction && process.env.FRONTEND_URL) {
-    try {
-        const frontendHostname = new URL(process.env.FRONTEND_URL).hostname; // e.g., autoinvoice-ai.onrender.com
-        // Get the eTLD+1, e.g., onrender.com
-        const parts = frontendHostname.split('.');
-        if (parts.length >= 2) {
-            cookieDomain = '.' + parts.slice(-2).join('.'); // .onrender.com
-            console.log(`Production cookie domain set to: ${cookieDomain}`);
-        }
-    } catch (e) {
-        console.error('Error parsing FRONTEND_URL for cookie domain:', e);
-    }
-}
-
 // Session Configuration
 app.use(session({
   store: new FileStore({
-    path: sessionsDir,
-    ttl: 86400, // 1 day
-    retries: 3, // Number of retries on failure
-    factor: 2,  // Exponential backoff factor
-    minTimeout: 100, // Minimum time between retries (ms)
-    maxTimeout: 300, // Maximum time between retries (ms)
+    path: './.sessions',
+    ttl: 86400,
     logFn: function(msg) { console.log('[session-file-store]', msg); }
   }),
-  secret: process.env.SESSION_SECRET || 'fallback-dev-secret-!@#$%',
+  secret: process.env.SESSION_SECRET || 'a-very-strong-fallback-secret-key-dev',
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: isProduction, 
+    secure: isProduction,
     httpOnly: true,
-    maxAge: 24 * 60 * 60 * 1000, 
-    sameSite: isProduction ? 'None' : 'Lax', // Must be 'None' for cross-domain with Secure=true
-    domain: isProduction ? cookieDomain : undefined, // Share cookie across subdomains
+    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    sameSite: isProduction ? 'lax' : 'lax', // Start with lax
+    // domain: isProduction ? frontendDomain : undefined, // Set domain for production if FE/BE on different subdomains but same parent e.g. app.site.com, api.site.com
+                                                    // Or if on completely different domains, this might be more complex and might need `None` with `Secure`.
+                                                    // For now, let's rely on `lax` and the browser's default behavior for same-origin or first-party contexts.
   }
 }));
 
@@ -163,87 +129,106 @@ app.get('/auth/google', async (req, res) => {
     // We still need an initial client instance to generate the URL
     const oAuth2ClientForUrl = await getOAuthClient(); 
     const authUrl = getAuthUrl(oAuth2ClientForUrl);
-    console.log(`[Auth Google] Redirecting to Google Auth URL. Session ID: ${req.sessionID}`);
     res.redirect(authUrl);
   } catch (error) { 
-    console.error('[Auth Google] Failed to start Google OAuth flow:', error);
-    res.status(500).send('Failed to initiate Google authentication.');
+    console.error('Failed to start Google OAuth flow:', error);
+    res.status(500).send('Failed to initiate Google authentication. Check server logs and OAuth environment variables. Error: ' + error.message);
   }
 });
 
 app.get('/auth/google/callback', async (req, res) => {
   const code = req.query.code;
-  if (!code) return res.status(400).send('Authorization code missing.');
-  console.log(`[Auth Callback] Received code: ${code.substring(0,10)}... Current session ID: ${req.sessionID}`);
-
+  if (!code) {
+    return res.status(400).send('Authorization code missing.');
+  }
+  console.log(`[Auth Callback] Received code: ${code.substring(0,10)}...`);
   try {
     const oAuth2ClientForCallback = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, process.env.GOOGLE_REDIRECT_URI
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI
     );
     const { tokens } = await oAuth2ClientForCallback.getToken(code);
     oAuth2ClientForCallback.setCredentials(tokens);
+
     const oauth2 = google.oauth2({version: 'v2', auth: oAuth2ClientForCallback});
     const { data: googleUserProfile } = await oauth2.userinfo.get();
     
-    const userData = { id: googleUserProfile.id, email: googleUserProfile.email, name: googleUserProfile.name, picture: googleUserProfile.picture };
-    const tempAuthToken = uuidv4();
+    const userData = {
+      id: googleUserProfile.id,
+      email: googleUserProfile.email,
+      name: googleUserProfile.name,
+      picture: googleUserProfile.picture
+    };
 
+    const tempAuthToken = uuidv4();
     req.session.tempAuthData = {
         token: tempAuthToken,
         userData: userData,
         googleTokens: tokens,
-        expires: Date.now() + (5 * 60 * 1000)
+        expires: Date.now() + (5 * 60 * 1000) 
     };
-    
+
     console.log(`[Auth Callback] User ${userData.email} authenticated. Temp auth token ${tempAuthToken.substring(0,8)} stored in session ID: ${req.sessionID}`);
     
     req.session.save(err => {
       if (err) {
-        console.error('[Auth Callback] Session save ERROR before redirect:', err);
-        return res.status(500).send('Error saving session before redirecting.');
+        console.error('[Auth Callback] Session save error before redirect:', err);
+        return res.status(500).send('Error saving session before redirecting to frontend.');
       }
-      console.log(`[Auth Callback] Session ${req.sessionID} SAVED successfully. Redirecting to frontend with token ${tempAuthToken.substring(0,8)}...`);
-      // Cookies are set by express-session middleware based on res.writeHead(). No need to manually set here.
+      // Log the cookie that *should* be set
+      const sessionCookie = req.sessionStore.generate(req);
+      console.log(`[Auth Callback] Session saved. Cookie to be set (approx): ${sessionCookie}. Redirecting to frontend with token.`);
       res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth-success?token=${tempAuthToken}`);
     });
+
   } catch (error) {
-    console.error('[Auth Callback] Catastrophic Error:', error.response ? JSON.stringify(error.response.data) : error.message, error.stack);
-    res.status(500).send('Error processing Google authentication.');
+    console.error('[Auth Callback] Error during Google OAuth callback:', error.response ? error.response.data : error.message, error.stack);
+    res.status(500).send('Error processing Google authentication: ' + (error.response ? error.response.data.error_description || error.message : error.message));
   }
 });
 
 // Token Exchange Endpoint
 app.get('/api/exchange-token', (req, res) => {
   const { token: providedToken } = req.query;
-  console.log(`[Exchange Token] Request received. Session ID: ${req.sessionID}, Provided Token: ${providedToken ? providedToken.substring(0,8):'NONE'}`);
-  console.log(`[Exchange Token] Current req.session.tempAuthData from session ${req.sessionID}:`, req.session.tempAuthData);
+  console.log(`[Exchange Token] Received request. Session ID: ${req.sessionID}, Provided Token: ${providedToken ? providedToken.substring(0,8) : 'NONE'}`);
+  console.log(`[Exchange Token] Current req.session.tempAuthData:`, req.session.tempAuthData);
 
-  if (!req.session.tempAuthData || req.session.tempAuthData.token !== providedToken) {
-    console.warn('[Exchange Token] Validation FAILED: Invalid or missing temp token in session, or token mismatch.', 
-                 { expectedToken: req.session.tempAuthData?.token?.substring(0,8), provided: providedToken?.substring(0,8), sessionDataExists: !!req.session.tempAuthData });
-    return res.status(401).json({ success: false, message: 'Invalid or expired auth token (session/token mismatch).' });
+  if (!req.session.tempAuthData || !req.session.tempAuthData.token || req.session.tempAuthData.token !== providedToken) {
+    console.warn('[Exchange Token] Invalid or missing temporary token in session or mismatched token.', { 
+      sessionTempToken: req.session.tempAuthData?.token?.substring(0,8),
+      sessionTempDataExists: !!req.session.tempAuthData,
+      providedToken: providedToken?.substring(0,8) 
+    });
+    return res.status(401).json({ success: false, message: 'Invalid or expired authentication token (session/token mismatch).' });
   }
   
   const tokenData = req.session.tempAuthData;
+  
   if (tokenData.expires < Date.now()) {
-    console.warn('[Exchange Token] Temp token EXPIRED.');
+    console.warn('[Exchange Token] Temporary token expired.');
     delete req.session.tempAuthData;
-    req.session.save(saveErr => { if(saveErr) console.error('[Exchange Token] Error saving session after deleting expired tempAuthData:', saveErr); });
-    return res.status(401).json({ success: false, message: 'Auth token expired.' });
+    req.session.save(); // Save after deleting
+    return res.status(401).json({ success: false, message: 'Authentication token expired.' });
   }
   
   req.session.user = tokenData.userData;
   req.session.googleTokens = tokenData.googleTokens;
-  console.log(`[Exchange Token] User ${req.session.user.email} main session variables ESTABLISHED in session ${req.sessionID}.`);
+  console.log(`[Exchange Token] User ${req.session.user.email} main session variables being established.`);
+  
   delete req.session.tempAuthData;
   
   req.session.save(err => {
     if (err) {
-      console.error('[Exchange Token] Session save ERROR after establishing main session:', err);
+      console.error('[Exchange Token] Session save error after establishing main session:', err);
       return res.status(500).json({ success: false, message: 'Error saving session after token exchange.' });
     }
-    console.log(`[Exchange Token] Main session ${req.sessionID} SAVED for user ${req.session.user.email}.`);
-    res.status(200).json({ success: true, message: 'Authentication successful.', user: tokenData.userData });
+    console.log(`[Exchange Token] Main session saved for user ${req.session.user.email}.`);
+    res.status(200).json({ 
+      success: true, 
+      message: 'Authentication successful, session established.',
+      user: tokenData.userData
+    });
   });
 });
 
@@ -602,12 +587,17 @@ app.post('/api/logout', (req, res) => { // Using POST for logout is a good pract
   });
 });
 
+// Make sure the .sessions directory exists or handle its creation
+const sessionsDir = './.sessions';
+if (!fs.existsSync(sessionsDir)){
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    console.log(`Created session directory: ${sessionsDir}`)
+}
+
 app.listen(port, () => {
   console.log(`Autoinvoice AI Backend is running on port ${port}, production: ${isProduction}`);
   console.log(`Frontend URL configured as: ${process.env.FRONTEND_URL}`);
   console.log(`Backend Google Redirect URI: ${process.env.GOOGLE_REDIRECT_URI}`);
-  console.log(`Session dir: ${sessionsDir}`);
-  if(isProduction) console.log(`Cookie domain: ${cookieDomain}`);
 });
 
 export default app;
