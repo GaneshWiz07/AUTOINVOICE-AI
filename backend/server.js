@@ -589,15 +589,109 @@ app.post('/api/logout', (req, res) => { // Using POST for logout is a good pract
 app.get('/auth-success', (req, res) => {
   const token = req.query.token;
   
+  // Check if FRONTEND_URL is set in environment variables
+  const frontendUrl = process.env.FRONTEND_URL;
+  
+  if (!frontendUrl) {
+    console.error('FRONTEND_URL environment variable is not set! This is required for redirects.');
+    
+    // If no FRONTEND_URL is available, display an HTML page with instructions
+    // This is a temporary solution until environment variables are properly set
+    if (token) {
+      const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Authentication Success</title>
+        <style>
+          body { font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; color: #333; }
+          .container { max-width: 800px; margin: 0 auto; }
+          h1 { color: #2c3e50; }
+          .token { background: #f8f9fa; padding: 15px; border-radius: 4px; font-family: monospace; word-break: break-all; }
+          .success { color: #27ae60; }
+          button { background: #3498db; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; }
+          button:hover { background: #2980b9; }
+          .note { background: #ffeaa7; padding: 10px; border-radius: 4px; margin-top: 20px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>Authentication Successful ✅</h1>
+          <p>Your authentication with Google was successful! However, the server needs additional configuration to complete the process.</p>
+          
+          <h2>Your Authentication Token:</h2>
+          <div class="token">${token}</div>
+          
+          <h2>Next Steps:</h2>
+          <p>If your frontend is running at a different URL, you can manually navigate there and exchange this token.</p>
+          
+          <div id="frontendUrl">
+            <h3>Enter your frontend URL:</h3>
+            <input type="text" id="url" placeholder="e.g., http://localhost:5173" style="width: 300px; padding: 8px;">
+            <button onclick="navigate()">Go to Frontend</button>
+          </div>
+          
+          <div class="note">
+            <strong>Admin Note:</strong> This page is shown because the FRONTEND_URL environment variable is not set in the server configuration.
+            Please set this variable to automatically redirect users after authentication.
+          </div>
+        </div>
+        
+        <script>
+          function navigate() {
+            const baseUrl = document.getElementById('url').value.trim();
+            if (!baseUrl) {
+              alert('Please enter a frontend URL');
+              return;
+            }
+            // Ensure no trailing slash on the base URL
+            const cleanBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+            const redirectUrl = cleanBaseUrl + '/auth-success?token=${token}';
+            window.location.href = redirectUrl;
+          }
+        </script>
+      </body>
+      </html>
+      `;
+      
+      return res.send(html);
+    } else {
+      return res.status(500).send('Server configuration error: FRONTEND_URL is not set. Please contact the administrator.');
+    }
+  }
+  
+  // Log the redirect for debugging
+  console.log(`Redirecting from /auth-success to frontend URL: ${frontendUrl}`);
+  
   // If we have a token, redirect to the correct frontend URL
   if (token) {
-    console.log('Received request to /auth-success, redirecting to frontend...');
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    console.log(`With token: ${token.substring(0, 8)}...`);
     return res.redirect(`${frontendUrl}/auth-success?token=${token}`);
   }
   
   // If no token, just redirect to the frontend homepage
-  res.redirect(process.env.FRONTEND_URL || 'http://localhost:5173');
+  console.log('No token provided, redirecting to frontend homepage');
+  res.redirect(frontendUrl);
+});
+
+// Debug endpoint to check environment variables (don't expose sensitive values)
+app.get('/api/check-env', (req, res) => {
+  const envStatus = {
+    FRONTEND_URL: process.env.FRONTEND_URL ? 'Set ✅' : 'Not set ❌',
+    GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ? 'Set ✅' : 'Not set ❌',
+    GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET ? 'Set ✅' : 'Not set ❌',
+    GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI ? 'Set ✅' : 'Not set ❌',
+    SUPABASE_URL: process.env.SUPABASE_URL ? 'Set ✅' : 'Not set ❌',
+    SUPABASE_KEY: process.env.SUPABASE_KEY ? 'Set ✅' : 'Not set ❌',
+    OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY ? 'Set ✅' : 'Not set ❌',
+    NODE_ENV: process.env.NODE_ENV || 'Not set'
+  };
+  
+  // Show the actual value of FRONTEND_URL for debugging
+  envStatus.FRONTEND_URL_VALUE = process.env.FRONTEND_URL;
+  
+  console.log('Environment variables status:', envStatus);
+  res.json(envStatus);
 });
 
 app.listen(port, () => {
