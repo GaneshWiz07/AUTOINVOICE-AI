@@ -25,23 +25,31 @@ const app = express();
 const port = process.env.PORT || 3001;
 
 // Session Configuration
-// IMPORTANT: In production, use a persistent session store instead of MemoryStore.
-// Examples: connect-pg-simple (for Supabase/Postgres), connect-redis, connect-mongo
 app.use(session({
-  secret: 'autoinvoice-ai-default-secret', // Using a hardcoded secret instead of env variable
+  secret: 'autoinvoice-ai-default-secret', // Keep this or use a strong env var
   resave: false,
-  saveUninitialized: true, // Change to true to ensure session is always stored
+  saveUninitialized: true, // Keeps session created even if not modified, can be useful
   cookie: {
-    secure: false, // Set to false for development (no HTTPS)
+    secure: process.env.NODE_ENV === 'production', // TRUE in production (like Render), false in dev
     httpOnly: true,
     maxAge: 24 * 60 * 60 * 1000, // 24 hours
-    sameSite: 'lax' // Allow cookies to be sent in cross-origin requests
+    // For cross-domain cookies to work with HTTPS, SameSite='None' is needed.
+    // 'lax' is more secure if frontend and backend are on the same site (e.g. subdomains of the same eTLD+1)
+    // On Render, your frontend and backend might be on different subdomains of onrender.com or custom domains.
+    // Using 'None' with 'secure: true' is a common setup for this.
+    sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'lax'
   }
+  // IMPORTANT FOR PRODUCTION ON RENDER:
+  // The default MemoryStore is not suitable for production as it will leak memory
+  // and won't work across multiple instances or if your app restarts.
+  // Consider using a persistent store like connect-redis, connect-mongo, or connect-pg-simple.
+  // Example with connect-redis (you'd need to npm install redis connect-redis):
+  // store: new RedisStore({ client: redisClient, prefix: "autoinvoice_sess:" }),
 }));
 
-app.use(cors({ 
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials: true, // Important: Allow cookies to be sent from frontend
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173', // CRITICAL: Ensure FRONTEND_URL is correct in Render
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
@@ -124,6 +132,7 @@ app.get('/auth/google', async (req, res) => {
 
 app.get('/auth/google/callback', async (req, res) => {
   const code = req.query.code;
+  console.log('Google callback received with code:', code ? 'Yes' : 'No');
   if (!code) {
     return res.status(400).send('Authorization code missing.');
   }
@@ -134,96 +143,94 @@ app.get('/auth/google/callback', async (req, res) => {
       process.env.GOOGLE_CLIENT_SECRET,
       process.env.GOOGLE_REDIRECT_URI
     );
-    // Get tokens from Google
+    
+    console.log('Exchanging code for tokens...');
     const { tokens } = await oAuth2ClientForCallback.getToken(code);
     oAuth2ClientForCallback.setCredentials(tokens);
+    console.log('Tokens obtained:', tokens ? 'Yes (details below)' : 'No');
+    if(tokens) console.log('Token details (partial):', { access_token_exists: !!tokens.access_token, refresh_token_exists: !!tokens.refresh_token, expiry_date: tokens.expiry_date });
 
-    // Store tokens in session
-    req.session.googleTokens = tokens; 
-
-    // Fetch user info
     const oauth2 = google.oauth2({version: 'v2', auth: oAuth2ClientForCallback});
     const { data: googleUserProfile } = await oauth2.userinfo.get();
-    
-    // Store user data in session
-    req.session.user = {
+    console.log('Google user profile fetched:', googleUserProfile ? googleUserProfile.email : 'Error/No profile');
+
+    const userData = {
       id: googleUserProfile.id,
       email: googleUserProfile.email,
       name: googleUserProfile.name,
       picture: googleUserProfile.picture
     };
 
-    // Create a temporary auth token that can be exchanged for a session
+    // Create a temporary auth token
     const tempAuthToken = uuidv4();
-    
-    // Store this token temporarily (we'll use a global Map for simplicity, in production use Redis)
     if (!global.tempAuthTokens) {
       global.tempAuthTokens = new Map();
     }
-    
-    // Store the user data with the token (expires in 5 minutes)
     global.tempAuthTokens.set(tempAuthToken, {
-      userData: req.session.user,
+      userData: userData,
       googleTokens: tokens,
       expires: Date.now() + (5 * 60 * 1000) // 5 minutes
     });
+    console.log(`Temp auth token ${tempAuthToken.substring(0,8)}... created for user ${userData.email}`);
 
-    // Debug log
-    console.log(`User ${googleUserProfile.email} authenticated. Tokens stored with tempAuthToken: ${tempAuthToken.substring(0, 8)}...`);
-    
-    // Set expiration cleanup for token
     setTimeout(() => {
       if (global.tempAuthTokens && global.tempAuthTokens.has(tempAuthToken)) {
         global.tempAuthTokens.delete(tempAuthToken);
-        console.log(`Expired tempAuthToken ${tempAuthToken.substring(0, 8)}...`);
+        console.log(`Temp auth token ${tempAuthToken.substring(0,8)}... expired and deleted.`);
       }
     }, 5 * 60 * 1000);
-    
+
     // Redirect with token
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth-success?token=${tempAuthToken}`);
+    const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth-success?token=${tempAuthToken}`;
+    console.log('Redirecting to frontend with token:', redirectUrl);
+    res.redirect(redirectUrl);
 
   } catch (error) {
-    console.error('Error during Google OAuth callback:', error);
-    req.session.destroy(err => {
-      if (err) console.error('Error destroying session on auth failure:', err);
-    });
+    console.error('Error during Google OAuth callback:', error.response ? error.response.data : error.message, error.stack);
+    // Do NOT destroy session here as it might not exist or be fully set up.
     res.status(500).send('Error processing Google authentication: ' + error.message);
   }
 });
 
-// Add a token exchange endpoint to validate temporary tokens
 app.get('/api/exchange-token', (req, res) => {
   const { token } = req.query;
-  
-  if (!token || !global.tempAuthTokens || !global.tempAuthTokens.has(token)) {
+  console.log('Exchange token request received. Token provided:', token ? 'Yes' : 'No');
+
+  if (!token) {
+    console.warn('Exchange token attempt with no token.');
+    return res.status(400).json({ success: false, message: 'Token missing.' });
+  }
+
+  if (!global.tempAuthTokens || !global.tempAuthTokens.has(token)) {
+    console.warn(`Exchange token attempt with invalid/expired/unknown token: ${token.substring(0,8)}...`);
     return res.status(401).json({ success: false, message: 'Invalid or expired token' });
   }
-  
+
   const tokenData = global.tempAuthTokens.get(token);
-  
-  // Check if token is expired
+  console.log(`Found temp token data for ${token.substring(0,8)}... User: ${tokenData.userData.email}`);
+
   if (tokenData.expires < Date.now()) {
-    global.tempAuthTokens.delete(token);
+    console.warn(`Exchange token attempt with expired token (server-side check): ${token.substring(0,8)}...`);
+    global.tempAuthTokens.delete(token); // Clean up expired token
     return res.status(401).json({ success: false, message: 'Token expired' });
   }
-  
+
   // Set up the user's session
   req.session.user = tokenData.userData;
   req.session.googleTokens = tokenData.googleTokens;
+  console.log(`Session data being set for user: ${req.session.user.email}. Session ID: ${req.sessionID}`);
   
-  // Remove the temporary token
-  global.tempAuthTokens.delete(token);
-  
-  // Save the session
+  global.tempAuthTokens.delete(token); // Remove the temporary token after use
+  console.log(`Temp token ${token.substring(0,8)}... deleted after successful exchange.`);
+
   req.session.save(err => {
     if (err) {
       console.error('Session save error during token exchange:', err);
       return res.status(500).json({ success: false, message: 'Error saving session' });
     }
-    
-    // Return success with user data
-    res.status(200).json({ 
-      success: true, 
+    console.log(`Session saved successfully for user: ${req.session.user.email}. Cookie being sent (check browser).`);
+    res.status(200).json({
+      success: true,
       message: 'Authentication successful',
       user: tokenData.userData
     });
@@ -548,10 +555,10 @@ app.put('/api/invoices/:id/status', async (req, res) => {
 
 // New endpoint to get current user info from session
 app.get('/api/me', (req, res) => {
+  console.log(`/api/me called. Session ID: ${req.sessionID}. User in session:`, req.session.user ? req.session.user.email : 'No user');
   if (req.session && req.session.user) {
     res.status(200).json({ user: req.session.user });
   } else {
-    // No active session or user data in session
     res.status(401).json({ message: 'Not authenticated' }); 
   }
 });
@@ -573,127 +580,29 @@ app.get('/api/session-check', (req, res) => {
 
 // New endpoint for user logout
 app.post('/api/logout', (req, res) => { // Using POST for logout is a good practice
+  const userEmail = req.session.user ? req.session.user.email : 'Unknown user';
+  console.log(`Logout attempt for user: ${userEmail}. Session ID: ${req.sessionID}`);
   req.session.destroy(err => {
     if (err) {
       console.error('Error destroying session during logout:', err);
       return res.status(500).send({ message: 'Could not log out, please try again.' });
     }
-    // Clear the session cookie from the browser.
-    // The name 'connect.sid' is the default for express-session. If you configured a different name, use that.
-    res.clearCookie('connect.sid'); 
+    // The name 'connect.sid' is the default for express-session.
+    res.clearCookie('connect.sid'); // Ensure this matches your session cookie name if customized
+    console.log(`Session destroyed for ${userEmail}. Cookie cleared.`);
     res.status(200).json({ message: 'Logged out successfully' });
   });
 });
 
-// Add a temporary redirect handler for /auth-success to fix the routing issue
-app.get('/auth-success', (req, res) => {
-  const token = req.query.token;
-  
-  // Check if FRONTEND_URL is set in environment variables
-  const frontendUrl = process.env.FRONTEND_URL;
-  
-  if (!frontendUrl) {
-    console.error('FRONTEND_URL environment variable is not set! This is required for redirects.');
-    
-    // If no FRONTEND_URL is available, display an HTML page with instructions
-    // This is a temporary solution until environment variables are properly set
-    if (token) {
-      const html = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Authentication Success</title>
-        <style>
-          body { font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; color: #333; }
-          .container { max-width: 800px; margin: 0 auto; }
-          h1 { color: #2c3e50; }
-          .token { background: #f8f9fa; padding: 15px; border-radius: 4px; font-family: monospace; word-break: break-all; }
-          .success { color: #27ae60; }
-          button { background: #3498db; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; }
-          button:hover { background: #2980b9; }
-          .note { background: #ffeaa7; padding: 10px; border-radius: 4px; margin-top: 20px; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <h1>Authentication Successful ✅</h1>
-          <p>Your authentication with Google was successful! However, the server needs additional configuration to complete the process.</p>
-          
-          <h2>Your Authentication Token:</h2>
-          <div class="token">${token}</div>
-          
-          <h2>Next Steps:</h2>
-          <p>If your frontend is running at a different URL, you can manually navigate there and exchange this token.</p>
-          
-          <div id="frontendUrl">
-            <h3>Enter your frontend URL:</h3>
-            <input type="text" id="url" placeholder="e.g., http://localhost:5173" style="width: 300px; padding: 8px;">
-            <button onclick="navigate()">Go to Frontend</button>
-          </div>
-          
-          <div class="note">
-            <strong>Admin Note:</strong> This page is shown because the FRONTEND_URL environment variable is not set in the server configuration.
-            Please set this variable to automatically redirect users after authentication.
-          </div>
-        </div>
-        
-        <script>
-          function navigate() {
-            const baseUrl = document.getElementById('url').value.trim();
-            if (!baseUrl) {
-              alert('Please enter a frontend URL');
-              return;
-            }
-            // Ensure no trailing slash on the base URL
-            const cleanBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
-            const redirectUrl = cleanBaseUrl + '/auth-success?token=${token}';
-            window.location.href = redirectUrl;
-          }
-        </script>
-      </body>
-      </html>
-      `;
-      
-      return res.send(html);
-    } else {
-      return res.status(500).send('Server configuration error: FRONTEND_URL is not set. Please contact the administrator.');
-    }
-  }
-  
-  // Log the redirect for debugging
-  console.log(`Redirecting from /auth-success to frontend URL: ${frontendUrl}`);
-  
-  // If we have a token, redirect to the correct frontend URL
-  if (token) {
-    console.log(`With token: ${token.substring(0, 8)}...`);
-    return res.redirect(`${frontendUrl}/auth-success?token=${token}`);
-  }
-  
-  // If no token, just redirect to the frontend homepage
-  console.log('No token provided, redirecting to frontend homepage');
-  res.redirect(frontendUrl);
-});
-
-// Debug endpoint to check environment variables (don't expose sensitive values)
-app.get('/api/check-env', (req, res) => {
-  const envStatus = {
-    FRONTEND_URL: process.env.FRONTEND_URL ? 'Set ✅' : 'Not set ❌',
-    GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ? 'Set ✅' : 'Not set ❌',
-    GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET ? 'Set ✅' : 'Not set ❌',
-    GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI ? 'Set ✅' : 'Not set ❌',
-    SUPABASE_URL: process.env.SUPABASE_URL ? 'Set ✅' : 'Not set ❌',
-    SUPABASE_KEY: process.env.SUPABASE_KEY ? 'Set ✅' : 'Not set ❌',
-    OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY ? 'Set ✅' : 'Not set ❌',
-    NODE_ENV: process.env.NODE_ENV || 'Not set'
-  };
-  
-  // Show the actual value of FRONTEND_URL for debugging
-  envStatus.FRONTEND_URL_VALUE = process.env.FRONTEND_URL;
-  
-  console.log('Environment variables status:', envStatus);
-  res.json(envStatus);
-});
-
 app.listen(port, () => {
-  console.log(`Autoinvoice AI Backend is running on port ${port}`);
+  console.log(`Server listening at http://localhost:${port}. NODE_ENV: ${process.env.NODE_ENV}`);
+  if (process.env.NODE_ENV === 'production') {
+    console.log('Production mode: Cookie settings: secure=true, sameSite="None"');
+    console.log(`CORS origin configured for: ${process.env.FRONTEND_URL}`);
+  } else {
+    console.log('Development mode: Cookie settings: secure=false, sameSite="lax"');
+  }
 });
+
+// Export the app for potential use by serverless wrappers if needed, or for testing.
+export default app;
