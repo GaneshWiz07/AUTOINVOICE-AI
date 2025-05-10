@@ -1,12 +1,21 @@
 import axios from 'axios';
 import dotenv from 'dotenv';
-import poppler from 'pdf-poppler';
 import path from 'path';
 import os from 'os';
 import fs from 'fs/promises';
 import { v4 as uuidv4 } from 'uuid';
 
 dotenv.config();
+
+// Conditionally import pdf-poppler
+let poppler = null;
+try {
+  // Dynamic import to avoid breaking if the package is missing
+  poppler = require('pdf-poppler');
+  console.log('PDF-poppler module loaded successfully');
+} catch (error) {
+  console.warn('PDF-poppler module not available. PDF processing will be limited.');
+}
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
@@ -120,6 +129,16 @@ async function extractInvoiceDataWithOpenRouter(originalFileBuffer, originalMime
     try {
         if (originalMimeType === 'application/pdf') {
             console.log('Processing PDF: converting all pages to PNG...');
+            
+            // Check if pdf-poppler is available
+            if (!poppler) {
+                console.warn('PDF processing not available on this platform. PDF files will be processed as-is.');
+                return { 
+                    status: 'limited_processing', 
+                    message: 'PDF-poppler not available on this platform. Please use image files instead.'
+                };
+            }
+            
             tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'invoice-pdf-'));
             const tempPdfPath = path.join(tempDir, `${uuidv4()}.pdf`);
             const imageOutputBase = path.join(tempDir, 'page');
