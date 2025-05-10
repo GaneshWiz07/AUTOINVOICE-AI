@@ -585,6 +585,21 @@ app.post('/api/logout', (req, res) => { // Using POST for logout is a good pract
   });
 });
 
+// Add a temporary redirect handler for /auth-success to fix the routing issue
+app.get('/auth-success', (req, res) => {
+  const token = req.query.token;
+  
+  // If we have a token, redirect to the correct frontend URL
+  if (token) {
+    console.log('Received request to /auth-success, redirecting to frontend...');
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    return res.redirect(`${frontendUrl}/auth-success?token=${token}`);
+  }
+  
+  // If no token, just redirect to the frontend homepage
+  res.redirect(process.env.FRONTEND_URL || 'http://localhost:5173');
+});
+
 app.listen(port, () => {
   console.log(`Autoinvoice AI Backend is running on port ${port}`);
 });
