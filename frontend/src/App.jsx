@@ -8,7 +8,9 @@ import EditInvoiceModal from './components/EditInvoiceModal'
 import SummaryCards from './components/SummaryCards'
 import ActivityTimeline from './components/ActivityTimeline'
 
-const API_BASE_URL = 'http://localhost:3001' // Your backend URL
+// Use environment variable for backend API URL
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'
+console.log('Using API URL:', API_BASE_URL)
 
 // Configure axios defaults
 axios.defaults.withCredentials = true;
