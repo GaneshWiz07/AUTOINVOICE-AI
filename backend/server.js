@@ -1,7 +1,5 @@
 import express from 'express';
 import session from 'express-session';
-import connectPgSimple from 'connect-pg-simple';
-import pg from 'pg';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { supabase } from './supabaseClient.js';
@@ -14,70 +12,36 @@ import ExcelJS from 'exceljs';
 
 dotenv.config();
 
+// Check Supabase connection right after config is loaded and client is imported
 if (supabase) {
-  console.log('Supabase client initialized successfully for general operations.');
+  console.log('Supabase client initialized successfully.');
 } else {
-  console.error('CRITICAL: Supabase client failed to initialize.');
+  console.error('CRITICAL: Supabase client failed to initialize. Check .env and Supabase project status. Backend operations requiring Supabase will fail.');
+  // Optionally, exit if Supabase is absolutely critical for startup
+  // process.exit(1);
 }
 
 const app = express();
 const port = process.env.PORT || 3001;
 
-const PgStore = connectPgSimple(session);
-
-// Database Pool Configuration
-const dbPoolConfig = {
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-};
-
-// Attempt to extract hostname and resolve to IPv4 if in production to avoid IPv6 issues
-if (process.env.NODE_ENV === 'production' && process.env.DATABASE_URL) {
-  try {
-    const url = new URL(process.env.DATABASE_URL);
-    // Simple check, you might need a more robust DNS lookup here in a real scenario
-    // or use an IPv4-specific hostname from Supabase if available.
-    // For now, this is a placeholder for the concept.
-    // If your Supabase hostname consistently resolves to IPv6 first and causes issues,
-    // you might need to set an explicit IPv4 address or an IPv4-specific CNAME if Supabase provides one.
-    console.log(`Original DB hostname: ${url.hostname}`);
-    // pg library usually handles DNS resolution. If issues persist, 
-    // check pg documentation for options like 'family' or if your Supabase 
-    // provides an explicit IPv4 connection string/hostname.
-  } catch (e) {
-    console.error('Could not parse DATABASE_URL for hostname extraction:', e);
-  }
-}
-
-const pool = new pg.Pool(dbPoolConfig);
-
-pool.on('connect', () => {
-  console.log('Connected to PostgreSQL for session store via connection pool.');
-});
-pool.on('error', (err) => {
-  console.error('PostgreSQL pool error for session store:', err);
-});
-
+// Session Configuration
+// IMPORTANT: In production, use a persistent session store instead of MemoryStore.
+// Examples: connect-pg-simple (for Supabase/Postgres), connect-redis, connect-mongo
 app.use(session({
-  store: new PgStore({
-    pool: pool,
-    tableName: 'user_sessions',
-    createTableIfMissing: true,
-  }),
-  secret: process.env.SESSION_SECRET || 'autoinvoice-ai-super-strong-fallback-secret',
+  secret: 'autoinvoice-ai-default-secret', // Using a hardcoded secret instead of env variable
   resave: false,
-  saveUninitialized: false,
+  saveUninitialized: true, // Change to true to ensure session is always stored
   cookie: {
-    secure: process.env.NODE_ENV === 'production',
+    secure: false, // Set to false for development (no HTTPS)
     httpOnly: true,
-    maxAge: 24 * 60 * 60 * 1000,
-    sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'lax'
+    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    sameSite: 'lax' // Allow cookies to be sent in cross-origin requests
   }
 }));
 
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173', // CRITICAL: Ensure FRONTEND_URL is correct in Render
-  credentials: true,
+app.use(cors({ 
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  credentials: true, // Important: Allow cookies to be sent from frontend
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
@@ -85,14 +49,14 @@ app.use(express.json());
 
 // Helper function to get user info using the current auth state
 // MODIFIED: This will now primarily use session data
-async function getCurrentUserInfo(req) {
-  console.log('getCurrentUserInfo called. Session ID from req:', req.sessionID);
+async function getCurrentUserInfo(req) { // Pass req to access session
   if (req.session && req.session.user) {
-    console.log('User found in session for getCurrentUserInfo:', req.session.user.email);
-    return req.session.user;
+    return req.session.user; // Return user info stored in session
   }
-  console.warn('No user found in session for getCurrentUserInfo.');
-  return null;
+  // If no session user, try to fall back to old method (though this should be phased out for multi-user)
+  // For multi-user, if !req.session.user, they are not logged in via session.
+  console.warn('getCurrentUserInfo called without a user in session.');
+  return null; 
 }
 
 // Helper function to get a Gmail client using session tokens
@@ -160,7 +124,6 @@ app.get('/auth/google', async (req, res) => {
 
 app.get('/auth/google/callback', async (req, res) => {
   const code = req.query.code;
-  console.log('Google callback received with code:', code ? 'Yes' : 'No');
   if (!code) {
     return res.status(400).send('Authorization code missing.');
   }
@@ -171,94 +134,96 @@ app.get('/auth/google/callback', async (req, res) => {
       process.env.GOOGLE_CLIENT_SECRET,
       process.env.GOOGLE_REDIRECT_URI
     );
-    
-    console.log('Exchanging code for tokens...');
+    // Get tokens from Google
     const { tokens } = await oAuth2ClientForCallback.getToken(code);
     oAuth2ClientForCallback.setCredentials(tokens);
-    console.log('Tokens obtained:', tokens ? 'Yes (details below)' : 'No');
-    if(tokens) console.log('Token details (partial):', { access_token_exists: !!tokens.access_token, refresh_token_exists: !!tokens.refresh_token, expiry_date: tokens.expiry_date });
 
+    // Store tokens in session
+    req.session.googleTokens = tokens; 
+
+    // Fetch user info
     const oauth2 = google.oauth2({version: 'v2', auth: oAuth2ClientForCallback});
     const { data: googleUserProfile } = await oauth2.userinfo.get();
-    console.log('Google user profile fetched:', googleUserProfile ? googleUserProfile.email : 'Error/No profile');
-
-    const userData = {
+    
+    // Store user data in session
+    req.session.user = {
       id: googleUserProfile.id,
       email: googleUserProfile.email,
       name: googleUserProfile.name,
       picture: googleUserProfile.picture
     };
 
-    // Create a temporary auth token
+    // Create a temporary auth token that can be exchanged for a session
     const tempAuthToken = uuidv4();
+    
+    // Store this token temporarily (we'll use a global Map for simplicity, in production use Redis)
     if (!global.tempAuthTokens) {
       global.tempAuthTokens = new Map();
     }
+    
+    // Store the user data with the token (expires in 5 minutes)
     global.tempAuthTokens.set(tempAuthToken, {
-      userData: userData,
+      userData: req.session.user,
       googleTokens: tokens,
       expires: Date.now() + (5 * 60 * 1000) // 5 minutes
     });
-    console.log(`Temp auth token ${tempAuthToken.substring(0,8)}... created for user ${userData.email}`);
 
+    // Debug log
+    console.log(`User ${googleUserProfile.email} authenticated. Tokens stored with tempAuthToken: ${tempAuthToken.substring(0, 8)}...`);
+    
+    // Set expiration cleanup for token
     setTimeout(() => {
       if (global.tempAuthTokens && global.tempAuthTokens.has(tempAuthToken)) {
         global.tempAuthTokens.delete(tempAuthToken);
-        console.log(`Temp auth token ${tempAuthToken.substring(0,8)}... expired and deleted.`);
+        console.log(`Expired tempAuthToken ${tempAuthToken.substring(0, 8)}...`);
       }
     }, 5 * 60 * 1000);
-
+    
     // Redirect with token
-    const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth-success?token=${tempAuthToken}`;
-    console.log('Redirecting to frontend with token:', redirectUrl);
-    res.redirect(redirectUrl);
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth-success?token=${tempAuthToken}`);
 
   } catch (error) {
-    console.error('Error during Google OAuth callback:', error.response ? error.response.data : error.message, error.stack);
-    // Do NOT destroy session here as it might not exist or be fully set up.
+    console.error('Error during Google OAuth callback:', error);
+    req.session.destroy(err => {
+      if (err) console.error('Error destroying session on auth failure:', err);
+    });
     res.status(500).send('Error processing Google authentication: ' + error.message);
   }
 });
 
+// Add a token exchange endpoint to validate temporary tokens
 app.get('/api/exchange-token', (req, res) => {
   const { token } = req.query;
-  console.log('Exchange token request received. Token provided:', token ? 'Yes' : 'No');
-
-  if (!token) {
-    console.warn('Exchange token attempt with no token.');
-    return res.status(400).json({ success: false, message: 'Token missing.' });
-  }
-
-  if (!global.tempAuthTokens || !global.tempAuthTokens.has(token)) {
-    console.warn(`Exchange token attempt with invalid/expired/unknown token: ${token.substring(0,8)}...`);
+  
+  if (!token || !global.tempAuthTokens || !global.tempAuthTokens.has(token)) {
     return res.status(401).json({ success: false, message: 'Invalid or expired token' });
   }
-
+  
   const tokenData = global.tempAuthTokens.get(token);
-  console.log(`Found temp token data for ${token.substring(0,8)}... User: ${tokenData.userData.email}`);
-
+  
+  // Check if token is expired
   if (tokenData.expires < Date.now()) {
-    console.warn(`Exchange token attempt with expired token (server-side check): ${token.substring(0,8)}...`);
-    global.tempAuthTokens.delete(token); // Clean up expired token
+    global.tempAuthTokens.delete(token);
     return res.status(401).json({ success: false, message: 'Token expired' });
   }
-
+  
   // Set up the user's session
   req.session.user = tokenData.userData;
   req.session.googleTokens = tokenData.googleTokens;
-  console.log(`Session data being set for user: ${req.session.user.email}. Session ID: ${req.sessionID}`);
   
-  global.tempAuthTokens.delete(token); // Remove the temporary token after use
-  console.log(`Temp token ${token.substring(0,8)}... deleted after successful exchange.`);
-
+  // Remove the temporary token
+  global.tempAuthTokens.delete(token);
+  
+  // Save the session
   req.session.save(err => {
     if (err) {
       console.error('Session save error during token exchange:', err);
       return res.status(500).json({ success: false, message: 'Error saving session' });
     }
-    console.log(`Session saved successfully for user: ${req.session.user.email}. Cookie being sent (check browser).`);
-    res.status(200).json({
-      success: true,
+    
+    // Return success with user data
+    res.status(200).json({ 
+      success: true, 
       message: 'Authentication successful',
       user: tokenData.userData
     });
@@ -583,10 +548,10 @@ app.put('/api/invoices/:id/status', async (req, res) => {
 
 // New endpoint to get current user info from session
 app.get('/api/me', (req, res) => {
-  console.log(`/api/me called. Session ID: ${req.sessionID}. User in session:`, req.session.user ? req.session.user.email : 'No user');
   if (req.session && req.session.user) {
     res.status(200).json({ user: req.session.user });
   } else {
+    // No active session or user data in session
     res.status(401).json({ message: 'Not authenticated' }); 
   }
 });
@@ -607,29 +572,19 @@ app.get('/api/session-check', (req, res) => {
 });
 
 // New endpoint for user logout
-app.post('/api/logout', (req, res) => {
-  const userEmail = req.session.user ? req.session.user.email : 'Unknown user';
-  console.log(`Logout attempt for user: ${userEmail}. Session ID: ${req.sessionID}`);
+app.post('/api/logout', (req, res) => { // Using POST for logout is a good practice
   req.session.destroy(err => {
     if (err) {
       console.error('Error destroying session during logout:', err);
       return res.status(500).send({ message: 'Could not log out, please try again.' });
     }
-    res.clearCookie('connect.sid'); // Ensure cookie name matches
-    console.log(`Session destroyed for ${userEmail}. Cookie cleared.`);
+    // Clear the session cookie from the browser.
+    // The name 'connect.sid' is the default for express-session. If you configured a different name, use that.
+    res.clearCookie('connect.sid'); 
     res.status(200).json({ message: 'Logged out successfully' });
   });
 });
 
 app.listen(port, () => {
-  console.log(`Server listening at http://localhost:${port}. NODE_ENV: ${process.env.NODE_ENV}`);
-  if (process.env.NODE_ENV === 'production') {
-    console.log('Production mode: Cookie settings: secure=true, sameSite="None"');
-    console.log(`CORS origin configured for: ${process.env.FRONTEND_URL}`);
-  } else {
-    console.log('Development mode: Cookie settings: secure=false, sameSite="lax"');
-  }
+  console.log(`Autoinvoice AI Backend is running on port ${port}`);
 });
-
-// Export the app for potential use by serverless wrappers if needed, or for testing.
-export default app;
