@@ -10,6 +10,9 @@ import ActivityTimeline from './components/ActivityTimeline'
 
 const API_BASE_URL = 'http://localhost:3001' // Your backend URL
 
+// Configure axios defaults
+axios.defaults.withCredentials = true;
+
 // SVG logo component for AutoInvoice AI
 const Logo = () => (
   <svg 
@@ -56,6 +59,18 @@ function App() {
   useEffect(() => {
     const queryParams = new URLSearchParams(window.location.search)
     const email = queryParams.get('email')
+    const token = queryParams.get('token')
+
+    // Check for token from auth redirect
+    if (token) {
+      console.log('Auth token detected, exchanging for session...')
+      exchangeToken(token)
+      // Clear the URL params after processing
+      window.history.replaceState({}, document.title, window.location.pathname)
+      return
+    }
+
+    // Legacy email parameter handling
     if (email) {
       setUserInfo({ email })
       console.log('Logged in user:', email)
@@ -63,9 +78,49 @@ function App() {
       fetchInvoices() // Fetch invoices automatically on successful login redirect
     } else {
       // Optional: Check if user is already authenticated (e.g., via a backend check or stored token)
-      // For this app, we rely on the redirect or manual fetch after login.
+      checkAuthStatus()
     }
   }, [])
+
+  // Exchange token for session
+  const exchangeToken = async (token) => {
+    setIsLoading(true)
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/exchange-token?token=${token}`, {
+        withCredentials: true // Important to allow cookies to be set
+      })
+      if (response.data.success && response.data.user) {
+        setUserInfo(response.data.user)
+        console.log('Successfully authenticated:', response.data.user.email)
+        fetchInvoices()
+      } else {
+        console.error('Token exchange failed:', response.data.message)
+        setError('Authentication failed. Please try logging in again.')
+      }
+    } catch (err) {
+      console.error('Error exchanging token:', err)
+      setError('Authentication error. Please try logging in again.')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  // Check if user is already authenticated
+  const checkAuthStatus = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/me`, {
+        withCredentials: true // Important to receive cookies
+      })
+      if (response.data.user) {
+        setUserInfo(response.data.user)
+        console.log('User already authenticated:', response.data.user.email)
+        fetchInvoices()
+      }
+    } catch (err) {
+      // User not authenticated, do nothing
+      console.log('User not authenticated, showing login screen')
+    }
+  }
 
   const handleLogin = () => {
     window.location.href = `${API_BASE_URL}/auth/google`
@@ -79,11 +134,11 @@ function App() {
     setError(null)
     setProcessingMessage('')
     setHasLoadedInvoices(false) // Reset invoice loading state on logout
-    // Optionally clear the token.json on the backend if possible/needed,
-    // or manage tokens more robustly (e.g., HttpOnly cookies).
-    console.log('User logged out (frontend only).')
-    // Consider removing the local token.json file if implementing file system access in backend logout
-    // Or better, manage tokens via sessions or secure cookies.
+    
+    // Call the backend logout endpoint
+    axios.post(`${API_BASE_URL}/api/logout`, {}, { withCredentials: true })
+      .then(() => console.log('User logged out successfully.'))
+      .catch(err => console.error('Error during logout:', err))
   }
 
   const handleProcessEmails = async () => {
@@ -91,7 +146,7 @@ function App() {
     setError(null)
     setProcessingMessage('Processing emails... This may take a moment.')
     try {
-      const response = await axios.get(`${API_BASE_URL}/process-emails`)
+      const response = await axios.get(`${API_BASE_URL}/process-emails`, { withCredentials: true })
       setProcessingMessage(response.data.message || 'Processing complete. Fetching updated invoices...')
       console.log('Process emails response:', response.data)
       await fetchInvoices() // Refresh invoice list after processing
@@ -117,7 +172,7 @@ function App() {
     setIsLoading(true)
     setError(null)
     try {
-      const response = await axios.get(`${API_BASE_URL}/invoices`)
+      const response = await axios.get(`${API_BASE_URL}/invoices`, { withCredentials: true })
       setInvoices(response.data || [])
       // Mark that we've loaded invoices at least once
       setHasLoadedInvoices(true)
@@ -158,7 +213,7 @@ function App() {
     setError(null);
     try {
       console.log(`Saving invoice ${invoiceId} with data:`, updatedData);
-      const response = await axios.put(`${API_BASE_URL}/api/invoices/${invoiceId}`, updatedData);
+      const response = await axios.put(`${API_BASE_URL}/api/invoices/${invoiceId}`, updatedData, { withCredentials: true });
       console.log('Update response:', response.data);
       handleCloseEditModal();
       await fetchInvoices(); // Refresh the list
@@ -178,7 +233,7 @@ function App() {
       setError(null);
       try {
         console.log(`Deleting invoice ${invoiceId}`);
-        await axios.delete(`${API_BASE_URL}/api/invoices/${invoiceId}`);
+        await axios.delete(`${API_BASE_URL}/api/invoices/${invoiceId}`, { withCredentials: true });
         await fetchInvoices(); // Refresh the list
         setProcessingMessage('Invoice deleted successfully!');
       } catch (err) {
@@ -196,7 +251,7 @@ function App() {
     setIsLoading(true); // Indicate loading state
     setError(null);
     try {
-      const response = await axios.put(`${API_BASE_URL}/api/invoices/${invoiceId}/status`, { status: 'pending' });
+      const response = await axios.put(`${API_BASE_URL}/api/invoices/${invoiceId}/status`, { status: 'pending' }, { withCredentials: true });
       console.log('Set pending response:', response.data);
       // Update local state with the modified invoice (or re-fetch)
       setInvoices(prevInvoices =>

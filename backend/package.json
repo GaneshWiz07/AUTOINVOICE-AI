@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "build":"npm run build"
+    "build": "echo 'No build step required for backend'"
   },
   "keywords": [],
   "author": "",
@@ -19,6 +19,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "exceljs": "^4.4.0",
+    "express-session": "^1.17.3",
     "express": "^4.19.2",
     "googleapis": "^140.0.1",
     "multer": "^1.4.5-lts.1",
@@ -27,5 +28,8 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
   }
 }
