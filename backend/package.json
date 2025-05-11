@@ -16,14 +16,15 @@
     "@google-cloud/local-auth": "^3.0.1",
     "@supabase/supabase-js": "^2.26.0",
     "axios": "^1.6.0",
+    "connect-redis": "^7.1.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "exceljs": "^4.4.0",
     "express-session": "^1.17.3",
-    "connect-redis": "^7.0.0",
     "express": "^4.19.2",
     "googleapis": "^140.0.1",
     "multer": "^1.4.5-lts.1",
+    "redis": "^4.6.13",
     "uuid": "^10.0.0"
   },
   "optionalDependencies": {
