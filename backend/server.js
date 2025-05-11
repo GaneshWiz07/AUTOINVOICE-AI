@@ -28,20 +28,23 @@ const port = process.env.PORT || 3001;
 // IMPORTANT: In production, use a persistent session store instead of MemoryStore.
 // Examples: connect-pg-simple (for Supabase/Postgres), connect-redis, connect-mongo
 app.use(session({
-  secret: 'autoinvoice-ai-default-secret', // Using a hardcoded secret instead of env variable
+  secret: 'autoinvoice-ai-default-secret', // Keep this or use a strong secret from env
   resave: false,
-  saveUninitialized: true, // Change to true to ensure session is always stored
+  saveUninitialized: true, // Keep true to ensure session is saved
   cookie: {
-    secure: false, // Set to false for development (no HTTPS)
-    httpOnly: true,
+    secure: true, // IMPORTANT: Must be true for HTTPS (which Render uses)
+    httpOnly: true, // Good for security
     maxAge: 24 * 60 * 60 * 1000, // 24 hours
-    sameSite: 'lax' // Allow cookies to be sent in cross-origin requests
+    sameSite: 'None', // IMPORTANT: Allows cross-site cookie sending
+    // domain: 'onrender.com' // Consider uncommenting if both frontend/backend are .onrender.com subdomains
   }
+  // IMPORTANT: For production, replace MemoryStore with a persistent store
+  // store: new SomePersistentStore({ ...config... })
 }));
 
-app.use(cors({ 
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials: true, // Important: Allow cookies to be sent from frontend
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'https://autoinvoice-ai.onrender.com', // Ensure this is your exact frontend URL
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
