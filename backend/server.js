@@ -19,25 +19,40 @@ dotenv.config();
 // Configure Redis client
 let redisClient;
 if (process.env.NODE_ENV === 'production' && process.env.REDIS_URL) {
-    redisClient = createClient({
-        url: process.env.REDIS_URL,
-        // Add any other necessary Redis options (e.g., tls for production)
-        socket: {
-            tls: true, // Required for Redis on Render
-            rejectUnauthorized: false // May be needed depending on cert setup
-        }
-    });
-    redisClient.connect().catch(console.error);
+    const redisUrl = process.env.REDIS_URL;
+    let redisClientOptions = { url: redisUrl };
 
-    redisClient.on('connect', () => console.log('Connected to Redis...'));
-    redisClient.on('ready', () => console.log('Redis client ready...'));
-    redisClient.on('error', (err) => console.error('Redis Client Error', err));
+    // Render Redis instances typically use rediss:// and require TLS.
+    // The client library often handles this based on the URL scheme,
+    // but we can be explicit if needed.
+    if (redisUrl.startsWith('rediss://')) {
+        redisClientOptions.socket = {
+            tls: true,
+            // Render provides valid certs, so rejectUnauthorized should generally be true (default).
+            // If you still have issues, you might try 'false' temporarily for debugging,
+            // but it's not recommended for production.
+            // rejectUnauthorized: false 
+        };
+        console.log('Configuring Redis client with TLS for rediss:// URL.');
+    }
+
+    redisClient = createClient(redisClientOptions);
+
+    redisClient.on('connect', () => console.log('Attempting to connect to Redis...'));
+    redisClient.on('ready', () => console.log('Redis client ready and connected.'));
+    redisClient.on('error', (err) => console.error('Redis Client Error:', err)); // More detailed error logging
     redisClient.on('end', () => console.log('Redis connection closed.'));
+
+    // Attempt to connect
+    redisClient.connect().catch(err => {
+        console.error('Failed to connect to Redis during initial setup:', err);
+        // Optionally, you could prevent the app from starting or handle this more gracefully
+    });
+
 } else {
-    console.warn('Redis URL not provided or not in production. Using default MemoryStore.');
+    console.warn('Redis URL not provided or not in production. Using default MemoryStore for sessions.');
 }
 
-// Initialize Redis store
 const redisStore = redisClient ? new RedisStore({ client: redisClient, prefix: 'sess:' }) : null;
 
 
