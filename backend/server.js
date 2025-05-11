@@ -10,7 +10,36 @@ import { extractInvoiceDataWithOpenRouter } from './openRouterService.js';
 import { v4 as uuidv4 } from 'uuid';
 import ExcelJS from 'exceljs';
 
+// Import necessary modules for Redis session store
+import { createClient } from 'redis';
+import RedisStore from 'connect-redis';
+
 dotenv.config();
+
+// Configure Redis client
+let redisClient;
+if (process.env.NODE_ENV === 'production' && process.env.REDIS_URL) {
+    redisClient = createClient({
+        url: process.env.REDIS_URL,
+        // Add any other necessary Redis options (e.g., tls for production)
+        socket: {
+            tls: true, // Required for Redis on Render
+            rejectUnauthorized: false // May be needed depending on cert setup
+        }
+    });
+    redisClient.connect().catch(console.error);
+
+    redisClient.on('connect', () => console.log('Connected to Redis...'));
+    redisClient.on('ready', () => console.log('Redis client ready...'));
+    redisClient.on('error', (err) => console.error('Redis Client Error', err));
+    redisClient.on('end', () => console.log('Redis connection closed.'));
+} else {
+    console.warn('Redis URL not provided or not in production. Using default MemoryStore.');
+}
+
+// Initialize Redis store
+const redisStore = redisClient ? new RedisStore({ client: redisClient, prefix: 'sess:' }) : null;
+
 
 // Check Supabase connection right after config is loaded and client is imported
 if (supabase) {
@@ -28,22 +57,21 @@ const port = process.env.PORT || 3001;
 // IMPORTANT: In production, use a persistent session store instead of MemoryStore.
 // Examples: connect-pg-simple (for Supabase/Postgres), connect-redis, connect-mongo
 app.use(session({
-  secret: 'autoinvoice-ai-default-secret', // Keep this or use a strong secret from env
+  secret: process.env.SESSION_SECRET || 'autoinvoice-ai-default-secret', // Use a strong secret from env in production
   resave: false,
-  saveUninitialized: true, // Keep true to ensure session is saved
+  saveUninitialized: true, 
+  store: redisStore || undefined, // Use Redis store if available, otherwise default MemoryStore (dev)
   cookie: {
-    secure: true, // IMPORTANT: Must be true for HTTPS (which Render uses)
-    httpOnly: true, // Good for security
+    secure: process.env.NODE_ENV === 'production', // Use secure cookies in production (HTTPS)
+    httpOnly: true,
     maxAge: 24 * 60 * 60 * 1000, // 24 hours
-    sameSite: 'None', // IMPORTANT: Allows cross-site cookie sending
+    sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'lax', // Use None for production cross-site
     // domain: 'onrender.com' // Consider uncommenting if both frontend/backend are .onrender.com subdomains
   }
-  // IMPORTANT: For production, replace MemoryStore with a persistent store
-  // store: new SomePersistentStore({ ...config... })
 }));
 
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'https://autoinvoice-ai.onrender.com', // Ensure this is your exact frontend URL
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173', // Ensure this is your exact frontend URL
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
