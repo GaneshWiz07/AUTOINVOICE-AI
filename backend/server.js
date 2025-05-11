@@ -10,51 +10,7 @@ import { extractInvoiceDataWithOpenRouter } from './openRouterService.js';
 import { v4 as uuidv4 } from 'uuid';
 import ExcelJS from 'exceljs';
 
-// Import necessary modules for Redis session store
-import { createClient } from 'redis';
-import RedisStore from 'connect-redis';
-
 dotenv.config();
-
-// Configure Redis client
-let redisClient;
-if (process.env.NODE_ENV === 'production' && process.env.REDIS_URL) {
-    const redisUrl = process.env.REDIS_URL;
-    let redisClientOptions = { url: redisUrl };
-
-    // Render Redis instances typically use rediss:// and require TLS.
-    // The client library often handles this based on the URL scheme,
-    // but we can be explicit if needed.
-    if (redisUrl.startsWith('rediss://')) {
-        redisClientOptions.socket = {
-            tls: true,
-            // Render provides valid certs, so rejectUnauthorized should generally be true (default).
-            // If you still have issues, you might try 'false' temporarily for debugging,
-            // but it's not recommended for production.
-            // rejectUnauthorized: false 
-        };
-        console.log('Configuring Redis client with TLS for rediss:// URL.');
-    }
-
-    redisClient = createClient(redisClientOptions);
-
-    redisClient.on('connect', () => console.log('Attempting to connect to Redis...'));
-    redisClient.on('ready', () => console.log('Redis client ready and connected.'));
-    redisClient.on('error', (err) => console.error('Redis Client Error:', err)); // More detailed error logging
-    redisClient.on('end', () => console.log('Redis connection closed.'));
-
-    // Attempt to connect
-    redisClient.connect().catch(err => {
-        console.error('Failed to connect to Redis during initial setup:', err);
-        // Optionally, you could prevent the app from starting or handle this more gracefully
-    });
-
-} else {
-    console.warn('Redis URL not provided or not in production. Using default MemoryStore for sessions.');
-}
-
-const redisStore = redisClient ? new RedisStore({ client: redisClient, prefix: 'sess:' }) : null;
-
 
 // Check Supabase connection right after config is loaded and client is imported
 if (supabase) {
@@ -72,22 +28,20 @@ const port = process.env.PORT || 3001;
 // IMPORTANT: In production, use a persistent session store instead of MemoryStore.
 // Examples: connect-pg-simple (for Supabase/Postgres), connect-redis, connect-mongo
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'autoinvoice-ai-default-secret', // Use a strong secret from env in production
+  secret: 'autoinvoice-ai-default-secret', // Using a hardcoded secret instead of env variable
   resave: false,
-  saveUninitialized: true, 
-  store: redisStore || undefined, // Use Redis store if available, otherwise default MemoryStore (dev)
+  saveUninitialized: true, // Change to true to ensure session is always stored
   cookie: {
-    secure: process.env.NODE_ENV === 'production', // Use secure cookies in production (HTTPS)
+    secure: false, // Set to false for development (no HTTPS)
     httpOnly: true,
     maxAge: 24 * 60 * 60 * 1000, // 24 hours
-    sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'lax', // Use None for production cross-site
-    // domain: 'onrender.com' // Consider uncommenting if both frontend/backend are .onrender.com subdomains
+    sameSite: 'lax' // Allow cookies to be sent in cross-origin requests
   }
 }));
 
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173', // Ensure this is your exact frontend URL
-  credentials: true,
+app.use(cors({ 
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  credentials: true, // Important: Allow cookies to be sent from frontend
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
